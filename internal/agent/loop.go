@@ -94,7 +94,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) (
 	}
 	if t.Sensitive && a.Approve != nil {
 		if !a.Approve(ApprovalRequest{Tool: name, Args: args}) {
-			return "", fmt.Errorf("denied by user")
+			return "", fmt.Errorf("denied by user: sensitive actions cannot be approved in headless mode — do not retry this or similar commands; continue with non-sensitive tools or state the limitation in your final answer")
 		}
 	}
 	return t.Run(ToolContext{WorkDir: a.WorkDir}, args)
