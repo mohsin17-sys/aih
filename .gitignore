@@ -1,0 +1,14 @@
+# build artifacts
+bin/
+*.exe
+
+# session audit trails (may contain sensitive output)
+.aih/
+**/.aih/
+
+# local config with personal details
+config.local.toml
+
+# editor/OS noise
+.DS_Store
+*.swp
