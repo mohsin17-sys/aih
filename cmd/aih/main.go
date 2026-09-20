@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"aiharness/internal/agent"
-	"aiharness/config"
+	"aiharness/internal/app"
 	"aiharness/internal/providers"
 	"aiharness/internal/tui"
 )
@@ -20,13 +20,9 @@ func main() {
 	maxSteps := flag.Int("steps", 40, "maximum agent steps")
 	flag.Parse()
 
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
-	}
+	wd, _ := os.Getwd()
 
-	// TUI mode (Phase 4 session 1: layout only, static data)
+	// TUI mode: live agent, streaming events into the panes
 	if *execMode == "" {
 		if err := tui.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "tui:", err)
@@ -35,37 +31,14 @@ func main() {
 		return
 	}
 
-	// ---- headless mode (streaming events live) ----
-	wd, _ := os.Getwd()
-
-	tools := map[string]*agent.ToolHandler{
-		"read_file":   agent.ReadFileTool(),
-		"list_dir":    agent.ListDirTool(),
-		"write_file":  agent.WriteFileTool(),
-		"run_command": agent.RunCommandTool(),
+	// ---- headless mode (live streaming to stdout) ----
+	ag, err := app.NewAgent(wd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
 	}
-	if cfg.Jev.Enabled {
-		tools["jev_route"] = agent.JevRouteTool()
-	}
-	if cfg.Editor.BaseURL != "" {
-		mlx := providers.NewMLX(cfg.Editor.BaseURL, cfg.Editor.Model)
-		tools["generate_edit"] = agent.GenerateEditTool(mlx)
-	}
-
-	ag := &agent.Agent{
-		Planner: providers.NewMistral(cfg.Planner.Model),
-		Tools:   tools,
-		Approve: func(r agent.ApprovalRequest) bool {
-			return (r.Tool == "write_file" && cfg.Safety.AutoApproveWrite) ||
-				(r.Tool == "run_command" && cfg.Safety.AutoApproveShell)
-		},
-		WorkDir: wd,
-		Messages: []providers.Message{
-			{Role: "system", Content: agent.SystemPrompt},
-			{Role: "user", Content: *execMode},
-		},
-		Emit: printEvent, // live streaming instead of after-the-fact printing
-	}
+	ag.Messages = append(ag.Messages, providers.Message{Role: "user", Content: *execMode})
+	ag.Emit = printEvent
 
 	if err := ag.Run(context.Background(), *maxSteps); err != nil {
 		fmt.Fprintln(os.Stderr, "agent:", err)
@@ -75,8 +48,7 @@ func main() {
 	sessDir := filepath.Join(wd, ".aih", "sessions")
 	os.MkdirAll(sessDir, 0o755)
 	sessFile := filepath.Join(sessDir, time.Now().Format("20060102-150405")+".jsonl")
-	f, err := os.Create(sessFile)
-	if err == nil {
+	if f, err := os.Create(sessFile); err == nil {
 		enc := json.NewEncoder(f)
 		for _, ev := range ag.Events {
 			enc.Encode(ev)
