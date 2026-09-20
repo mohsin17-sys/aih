@@ -8,11 +8,10 @@ import (
 )
 
 // NewAgent builds a fully-equipped Agent for the given working directory.
-// The returned agent has only the system prompt in its message history;
-// callers append the user turn (headless: the -e task; TUI: per Enter key).
-// Approvals follow the config's auto-approve policy (interactive approvals
-// arrive in session 3).
-func NewAgent(wd string) (*agent.Agent, error) {
+// approver: if non-nil, it is used for every write/command approval (the TUI
+// passes an interactive y/n prompt). If nil, the config auto-approve policy
+// applies (headless behavior, unchanged).
+func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agent, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, err
@@ -32,14 +31,20 @@ func NewAgent(wd string) (*agent.Agent, error) {
 		tools["generate_edit"] = agent.GenerateEditTool(mlx)
 	}
 
-	return &agent.Agent{
-		Planner: providers.NewMistral(cfg.Planner.Model),
-		Tools:   tools,
-		Approve: func(r agent.ApprovalRequest) bool {
-			return (r.Tool == "write_file" && cfg.Safety.AutoApproveWrite) ||
-				(r.Tool == "run_command" && cfg.Safety.AutoApproveShell)
-		},
+	ag := &agent.Agent{
+		Planner:  providers.NewMistral(cfg.Planner.Model),
+		Tools:    tools,
 		WorkDir:  wd,
 		Messages: []providers.Message{{Role: "system", Content: agent.SystemPrompt}},
-	}, nil
+	}
+
+	if approver != nil {
+		ag.Approve = approver
+	} else {
+		ag.Approve = func(r agent.ApprovalRequest) bool {
+			return (r.Tool == "write_file" && cfg.Safety.AutoApproveWrite) ||
+				(r.Tool == "run_command" && cfg.Safety.AutoApproveShell)
+		}
+	}
+	return ag, nil
 }

@@ -22,17 +22,17 @@ func main() {
 
 	wd, _ := os.Getwd()
 
-	// TUI mode: live agent, streaming events into the panes
+	// TUI mode: live agent, interactive approvals, FRIDAY branding
 	if *execMode == "" {
 		if err := tui.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "tui:", err)
+			fmt.Fprintln(os.Stderr, "friday:", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// ---- headless mode (live streaming to stdout) ----
-	ag, err := app.NewAgent(wd)
+	// ---- headless mode (config auto-approve policy, live streaming) ----
+	ag, err := app.NewAgent(wd, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
@@ -44,7 +44,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "agent:", err)
 	}
 
-	// Persist session JSONL (audit trail)
 	sessDir := filepath.Join(wd, ".aih", "sessions")
 	os.MkdirAll(sessDir, 0o755)
 	sessFile := filepath.Join(sessDir, time.Now().Format("20060102-150405")+".jsonl")
@@ -58,7 +57,6 @@ func main() {
 	}
 }
 
-// printEvent renders one event line as it happens (headless live view).
 func printEvent(ev agent.Event) {
 	switch ev.Type {
 	case "tool_call":
