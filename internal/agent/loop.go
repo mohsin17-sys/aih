@@ -24,6 +24,19 @@ type Agent struct {
 	WorkDir  string
 	Messages []providers.Message
 	Events   []Event
+
+	// Emit, when non-nil, is called for every event as it happens
+	// (in addition to appending to Events). The TUI uses this to
+	// stream tool calls live; headless mode prints from it.
+	Emit func(Event)
+}
+
+// record appends an event and streams it if an emitter is attached.
+func (a *Agent) record(ev Event) {
+	a.Events = append(a.Events, ev)
+	if a.Emit != nil {
+		a.Emit(ev)
+	}
 }
 
 type Event struct {
@@ -47,14 +60,14 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 
 	assistantMsg := res.Messages[0]
 	if len(assistantMsg.ToolCalls) == 0 {
-		a.Events = append(a.Events, Event{Type: "assistant", Content: assistantMsg.Content})
+		a.record(Event{Type: "assistant", Content: assistantMsg.Content})
 		return true, nil
 	}
 
 	for _, call := range assistantMsg.ToolCalls {
 		var args map[string]any
 		json.Unmarshal([]byte(call.Function.Arguments), &args)
-		a.Events = append(a.Events, Event{Type: "tool_call", Tool: call.Function.Name, Args: args})
+		a.record(Event{Type: "tool_call", Tool: call.Function.Name, Args: args})
 
 		result, err := a.runTool(ctx, call.Function.Name, args)
 		msg := providers.Message{
@@ -64,10 +77,10 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 		}
 		if err != nil {
 			msg.Content = "ERROR: " + err.Error()
-			a.Events = append(a.Events, Event{Type: "error", Tool: call.Function.Name, Result: err.Error()})
+			a.record(Event{Type: "error", Tool: call.Function.Name, Result: err.Error()})
 		} else {
 			msg.Content = result
-			a.Events = append(a.Events, Event{Type: "tool_result", Tool: call.Function.Name, Result: result})
+			a.record(Event{Type: "tool_result", Tool: call.Function.Name, Result: result})
 		}
 		a.Messages = append(a.Messages, msg)
 	}

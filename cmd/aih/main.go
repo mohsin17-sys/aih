@@ -12,6 +12,7 @@ import (
 	"aiharness/internal/agent"
 	"aiharness/config"
 	"aiharness/internal/providers"
+	"aiharness/internal/tui"
 )
 
 func main() {
@@ -25,11 +26,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TUI mode (Phase 4 session 1: layout only, static data)
 	if *execMode == "" {
-		fmt.Println("aih: TUI not implemented yet — use: aih -e \"task\"")
+		if err := tui.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "tui:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
+	// ---- headless mode (streaming events live) ----
 	wd, _ := os.Getwd()
 
 	tools := map[string]*agent.ToolHandler{
@@ -58,24 +64,11 @@ func main() {
 			{Role: "system", Content: agent.SystemPrompt},
 			{Role: "user", Content: *execMode},
 		},
+		Emit: printEvent, // live streaming instead of after-the-fact printing
 	}
 
 	if err := ag.Run(context.Background(), *maxSteps); err != nil {
 		fmt.Fprintln(os.Stderr, "agent:", err)
-	}
-
-	// Print transcript
-	for _, ev := range ag.Events {
-		switch ev.Type {
-		case "tool_call":
-			fmt.Printf("→ %s %s\n", ev.Tool, compactArgs(ev.Args))
-		case "tool_result":
-			fmt.Printf("← %s\n", firstLine(ev.Result))
-		case "error":
-			fmt.Printf("✗ %s: %s\n", ev.Tool, firstLine(ev.Result))
-		case "assistant":
-			fmt.Printf("\n%s\n", ev.Content)
-		}
 	}
 
 	// Persist session JSONL (audit trail)
@@ -90,6 +83,20 @@ func main() {
 		}
 		f.Close()
 		fmt.Fprintf(os.Stderr, "session: %s\n", sessFile)
+	}
+}
+
+// printEvent renders one event line as it happens (headless live view).
+func printEvent(ev agent.Event) {
+	switch ev.Type {
+	case "tool_call":
+		fmt.Printf("→ %s %s\n", ev.Tool, compactArgs(ev.Args))
+	case "tool_result":
+		fmt.Printf("← %s\n", firstLine(ev.Result))
+	case "error":
+		fmt.Printf("✗ %s: %s\n", ev.Tool, firstLine(ev.Result))
+	case "assistant":
+		fmt.Printf("\n%s\n", ev.Content)
 	}
 }
 
