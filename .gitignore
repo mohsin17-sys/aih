@@ -12,3 +12,4 @@ config.local.toml
 # editor/OS noise
 .DS_Store
 *.swp
+notes.txt
