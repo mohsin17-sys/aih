@@ -1,0 +1,38 @@
+# FRIDAY configuration
+# Copy to: ~/.config/aih/config.toml
+# All sections are optional; missing values fall back to safe defaults.
+
+[planner]
+# The Mistral model that plans and drives tool calls.
+provider = "mistral"
+model = "mistral-large-latest"
+
+[editor]
+# Local Qwen model served by mlx-lm (optional).
+# NOTE: base_url MUST include the /v1 suffix — FRIDAY appends
+#       /chat/completions and /models to this base.
+#       Example: "http://192.168.1.50:8080/v1"
+provider = "mlx"
+base_url = "http://127.0.0.1:8080/v1"
+model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+
+[jev]
+# Routing orchestrator. If you don't run one, leave false —
+# everything works without it.
+enabled = false
+
+[safety]
+# Headless mode (-e) only. In the interactive TUI you approve
+# everything live; these decide what runs WITHOUT a human present.
+# Keep both false unless you trust the task completely.
+auto_approve_write = false
+auto_approve_shell = false
+max_cost_usd = 5.0
+
+[mcp]
+# Reserved for MCP server integrations.
+[mcp.servers]
+
+[ui]
+# Reserved for theme selection.
+theme = "default"
