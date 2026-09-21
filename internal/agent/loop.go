@@ -29,6 +29,10 @@ type Agent struct {
 	// (in addition to appending to Events). The TUI uses this to
 	// stream tool calls live; headless mode prints from it.
 	Emit func(Event)
+
+	// Session telemetry
+	TokensIn  int `json:"tokens_in"`
+	TokensOut int `json:"tokens_out"`
 }
 
 // record appends an event and streams it if an emitter is attached.
@@ -56,6 +60,10 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	a.TokensIn += res.Usage.PromptTokens
+	a.TokensOut += res.Usage.CompletionTokens
+	a.record(Event{Type: "usage", Tool: "planner", Args: map[string]any{
+		"in": res.Usage.PromptTokens, "out": res.Usage.CompletionTokens}})
 	a.Messages = append(a.Messages, res.Messages...)
 
 	assistantMsg := res.Messages[0]
@@ -105,10 +113,16 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) (
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
-	if t.Sensitive && a.Approve != nil {
-		if !a.Approve(ApprovalRequest{Tool: name, Args: args}) {
-			return "", fmt.Errorf("denied by user: sensitive actions cannot be approved in headless mode — do not retry this or similar commands; continue with non-sensitive tools or state the limitation in your final answer")
+	sensitive := t.Sensitive
+	if name == "run_command" {
+		if cmd, ok := args["command"].(string); ok {
+			sensitive = ShouldPrompt(cmd)
 		}
 	}
-	return t.Run(ToolContext{WorkDir: a.WorkDir}, args)
+	if sensitive && a.Approve != nil {
+		if !a.Approve(ApprovalRequest{Tool: name, Args: args}) {
+			return "", fmt.Errorf("denied by user — do not retry this or similar commands; continue with non-sensitive tools (read-only shell commands and file reads are always available) or state the limitation in your final answer")
+		}
+	}
+	return t.Run(ToolContext{WorkDir: a.WorkDir, Emit: a.record}, args)
 }

@@ -25,11 +25,21 @@ func GenerateEditTool(mlx *providers.MLX) *ToolHandler {
 			system := fmt.Sprintf(`You are a code editor. Generate the COMPLETE contents of %s.
 Output ONLY the file contents — no markdown fences, no commentary, no explanations.
 Follow the specification exactly. Use only APIs that appear in the specification.`, path)
-			content, err := mlx.Complete(system, spec)
+			res, err := mlx.CompleteWithUsage(system, spec)
 			if err != nil {
 				return "", err
 			}
-			content = strings.TrimSpace(content)
+
+			// stream Qwen telemetry into the event log
+			if tc.Emit != nil {
+				tc.Emit(Event{Type: "usage", Tool: "qwen", Args: map[string]any{
+					"in":  res.PromptTokens,
+					"out": res.CompletionToken,
+					"ms":  res.Duration.Milliseconds(),
+				}})
+			}
+
+			content := strings.TrimSpace(res.Content)
 			if strings.HasPrefix(content, "```") {
 				if i := strings.Index(content, "\n"); i > 0 {
 					content = content[i+1:]

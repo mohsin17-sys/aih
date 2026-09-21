@@ -8,6 +8,8 @@ import (
 
 type ToolContext struct {
 	WorkDir string
+	// Emit, when non-nil, lets a tool stream usage/telemetry events.
+	Emit func(Event)
 }
 
 type ApprovalRequest struct {

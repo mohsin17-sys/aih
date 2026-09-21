@@ -8,9 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"aiharness/config"
 	"aiharness/internal/agent"
 	"aiharness/internal/app"
 	"aiharness/internal/providers"
+
+	"net/http"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -107,6 +111,11 @@ func branding() string {
 
 // ---- messages ----
 
+type mlxHealthMsg struct {
+	up  bool
+	url string
+}
+
 type agentEventMsg agent.Event
 type agentDoneMsg struct{ err error }
 type approvalReqMsg struct{ req agent.ApprovalRequest }
@@ -133,6 +142,14 @@ type Model struct {
 	clipWidth    int
 	ready        bool
 	quitting     bool
+
+	// telemetry
+	tokensIn     int
+	tokensOut    int
+	qwenCalls    int
+	qwenMsTotal  int64
+	mlxUp        bool
+	mlxURL       string
 }
 
 // New builds the TUI model with a live agent and an interactive approver.
@@ -164,7 +181,32 @@ func New(wd string) (Model, error) {
 	}, nil
 }
 
-func (m Model) Init() tea.Cmd { return textinput.Blink }
+func (m Model) Init() tea.Cmd {
+	cmds := []tea.Cmd{textinput.Blink}
+	if m.mlxURL == "" {
+		if cfg, err := config.Load(); err == nil && cfg.Editor.BaseURL != "" {
+			m.mlxURL = cfg.Editor.BaseURL
+			cmds = append(cmds, pingMLX(m.mlxURL))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// pingMLX checks the local Qwen server every 15s.
+func pingMLX(url string) tea.Cmd {
+	url = strings.TrimSuffix(url, "/v1")
+	if url == "" {
+		return nil
+	}
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(url + "/v1/models")
+		if err != nil {
+			return mlxHealthMsg{up: false, url: url}
+		}
+		resp.Body.Close()
+		return mlxHealthMsg{up: resp.StatusCode == 200, url: url}
+	})
+}
 
 // waitEvent blocks until the next agent event.
 func waitEvent(ch chan agent.Event) tea.Cmd {
@@ -209,6 +251,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bannerShown = true
 		}
 		return m, nil
+
+	case mlxHealthMsg:
+		m.mlxUp = msg.up
+		m.mlxURL = msg.url
+		return m, pingMLX(msg.url)
 
 	case agentEventMsg:
 		m.renderEvent(agent.Event(msg))
@@ -297,7 +344,13 @@ func (m *Model) renderEvent(ev agent.Event) {
 		case "generate_edit":
 			m.editorCalls++
 		case "write_file":
-			if p, ok := ev.Args["file_path"].(string); ok {
+			p := ""
+			if v, ok := ev.Args["file_path"].(string); ok {
+				p = v
+			} else if v, ok := ev.Args["path"].(string); ok {
+				p = v
+			}
+			if p != "" {
 				m.filesChanged = appendUnique(m.filesChanged, p)
 			}
 		}
@@ -314,7 +367,27 @@ func (m *Model) renderEvent(ev agent.Event) {
 		m.appendTranscript(errStyle.Render("✗ "+ev.Tool+": "+clip(firstLine(ev.Result), maxInt(10, m.clipWidth-2))) + "\n")
 
 	case "assistant":
-		m.appendTranscript(assistantStyle.Render(clip(ev.Content, 4*m.clipWidth)) + "\n\n")
+		m.appendTranscript(assistantStyle.Render(wrap(ev.Content, m.clipWidth)) + "\n\n")
+
+	case "usage":
+		in, _ := ev.Args["in"].(int)
+		out, _ := ev.Args["out"].(int)
+		if ev.Tool == "qwen" {
+			m.qwenCalls++
+			var ms int64
+				switch v := ev.Args["ms"].(type) {
+				case int:
+					ms = int64(v)
+				case int64:
+					ms = v
+				case float64:
+					ms = int64(v)
+				}
+				m.qwenMsTotal += ms
+		} else {
+			m.tokensIn += in
+			m.tokensOut += out
+			}
 	}
 }
 
@@ -369,7 +442,11 @@ func (m Model) View() string {
 		Width(m.width - 2).
 		Render(inputStyle.Render("  " + m.input.View()))
 
-	statusLeft := "friday ▸ mistral-large ▸ qwen-14b@mlx"
+	dot := "○"
+	if m.mlxUp {
+		dot = "●"
+	}
+	statusLeft := "friday ▸ mistral-large ▸ qwen " + dot
 	if m.pending != nil {
 		statusLeft = askStyle.Render("🔑 approval needed: y / n")
 	} else if m.thinking {
@@ -395,6 +472,12 @@ func (m Model) sideLines() []string {
 		fmt.Sprintf("Editor calls:%d", m.editorCalls),
 		"",
 		fmt.Sprintf("Files changed: %d", len(m.filesChanged)),
+		"",
+		fmt.Sprintf("Tokens in:  %s", human(m.tokensIn)),
+		fmt.Sprintf("Tokens out: %s", human(m.tokensOut)),
+		fmt.Sprintf("Qwen calls: %d", m.qwenCalls),
+		fmt.Sprintf("Qwen avg:   %s", avgMs(m.qwenMsTotal, m.qwenCalls)),
+		fmt.Sprintf("Cost:       %s", costStr(m.tokensIn, m.tokensOut)),
 	}
 	for _, f := range m.filesChanged {
 		lines = append(lines, "  "+clip(f, sidePanelWidth-4))
@@ -444,6 +527,59 @@ func appendUnique(list []string, s string) []string {
 		}
 	}
 	return append(list, s)
+}
+
+// wrap folds s into lines of at most n runes, breaking on spaces where
+// possible. Full text is preserved — the viewport scrolls.
+func wrap(s string, n int) string {
+	if n < 8 {
+		n = 8
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		line := ""
+		for _, word := range strings.Fields(para) {
+			switch {
+				case line == "":
+					line = word
+				case len([]rune(line))+1+len([]rune(word)) <= n:
+					line += " " + word
+				default:
+					out = append(out, line)
+					line = word
+				}
+			}
+			out = append(out, line)
+		}
+	return strings.Join(out, "\n")
+}
+
+// human formats token counts compactly.
+func human(n int) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func avgMs(total int64, calls int) string {
+	if calls == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.1fs", float64(total)/float64(calls)/1000)
+}
+
+func costStr(in, out int) string {
+	p := os.Getenv("FRIDAY_PRICE_MTOK")
+	if p == "" {
+		return "—  (set $/MTok)"
+	}
+	var price float64
+	fmt.Sscanf(p, "%f", &price)
+	return fmt.Sprintf("$%.4f", float64(in+out)/1e6*price)
 }
 
 func maxInt(a, b int) int {
