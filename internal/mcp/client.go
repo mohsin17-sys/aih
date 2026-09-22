@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"time"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -20,13 +20,16 @@ type Server struct {
 	Env     []string
 	Trusted bool
 
-	mu     sync.Mutex
-	done   chan struct{}
-	cmd    *exec.Cmd
-	pipe   io.WriteCloser
-	stdin  chan []byte
-	nextID int
-	tools  []ToolDef
+	mu      sync.Mutex // guards pending, nextID, pipe, scanErr, closed
+	pending map[int]chan rpcResponse
+	writeMu sync.Mutex // serializes writes to pipe
+	done    chan struct{}
+	cmd     *exec.Cmd
+	pipe    io.WriteCloser
+	nextID  int
+	tools   []ToolDef
+	scanErr error
+	closed  bool
 }
 
 // ToolDef is one tool advertised by the server.
@@ -43,24 +46,22 @@ type rpcRequest struct {
 	Params  any    `json:"params,omitempty"`
 }
 
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
 type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int             `json:"id"`
 	Result  json.RawMessage `json:"result"`
-	Error   *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error   *rpcError       `json:"error"`
 }
 
 // Connect starts the server process and performs the MCP handshake.
+// On failure the child process is terminated before returning, so a
+// failing server never leaks a process.
 func (s *Server) Connect() error {
-	s.mu.Lock()
-	s.nextID = 1
-	s.stdin = make(chan []byte, 64)
-	s.done = make(chan struct{})
-	s.mu.Unlock()
-
 	cmd := exec.Command(s.Command, s.Args...)
 	cmd.Env = append(os.Environ(), s.Env...)
 	stdinPipe, err := cmd.StdinPipe()
@@ -74,21 +75,16 @@ func (s *Server) Connect() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("mcp %s: start %s: %w", s.Name, s.Command, err)
 	}
+
+	s.mu.Lock()
+	s.nextID = 1
+	s.pending = map[int]chan rpcResponse{}
+	s.done = make(chan struct{})
 	s.cmd = cmd
 	s.pipe = stdinPipe
+	s.mu.Unlock()
 
-	go func() {
-		defer close(s.done)
-		sc := bufio.NewScanner(stdoutPipe)
-		sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
-		for sc.Scan() {
-			var resp rpcResponse
-			if json.Unmarshal(sc.Bytes(), &resp) == nil && resp.ID != 0 {
-				b, _ := json.Marshal(resp)
-				s.stdin <- b
-			}
-		}
-	}()
+	go s.readLoop(stdoutPipe)
 
 	// initialize
 	var initRes struct {
@@ -99,67 +95,158 @@ func (s *Server) Connect() error {
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "friday", "version": "1.0"},
 	}, &initRes); err != nil {
+		s.Close()
 		return fmt.Errorf("mcp %s: initialize: %w", s.Name, err)
 	}
 	// initialized notification (no response expected)
 	notif, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	s.writeMu.Lock()
 	stdinPipe.Write(append(notif, '\n'))
+	s.writeMu.Unlock()
 
 	// discover tools
 	var listRes struct {
 		Tools []ToolDef `json:"tools"`
 	}
 	if err := s.roundtrip("tools/list", map[string]any{}, &listRes); err != nil {
+		s.Close()
 		return fmt.Errorf("mcp %s: tools/list: %w", s.Name, err)
 	}
+	s.mu.Lock()
 	s.tools = listRes.Tools
+	s.mu.Unlock()
 	return nil
 }
 
-// roundtrip sends a request and waits for the matching response.
+// readLoop parses server output and routes each response to the pending
+// call with the matching ID. Notifications and malformed lines are ignored.
+// On exit it fails every in-flight call so no roundtrip blocks forever.
+func (s *Server) readLoop(stdoutPipe io.Reader) {
+	defer close(s.done)
+	sc := bufio.NewScanner(stdoutPipe)
+	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	for sc.Scan() {
+		var resp rpcResponse
+		if json.Unmarshal(sc.Bytes(), &resp) != nil || resp.ID == 0 {
+			continue
+		}
+		s.mu.Lock()
+		ch, ok := s.pending[resp.ID]
+		delete(s.pending, resp.ID)
+		s.mu.Unlock()
+		if ok {
+			ch <- resp // buffered; exactly one delivery per ID
+		}
+	}
+	if err := sc.Err(); err != nil {
+		s.mu.Lock()
+		s.scanErr = err
+		s.mu.Unlock()
+	}
+	s.failAll()
+}
+
+// failAll aborts every pending call (server closed or unreadable).
+func (s *Server) failAll() {
+	s.mu.Lock()
+	pending := s.pending
+	s.pending = map[int]chan rpcResponse{}
+	s.mu.Unlock()
+	for id, ch := range pending {
+		select {
+		case ch <- rpcResponse{ID: id, Error: &rpcError{Message: s.readErrorLocked()}}:
+		default:
+		}
+	}
+}
+
+func (s *Server) readErrorLocked() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scanErr != nil {
+		return fmt.Sprintf("read error: %v", s.scanErr)
+	}
+	return "server closed"
+}
+
+// Close terminates the server process and closes its stdin pipe. It is
+// safe to call more than once and on servers that never connected.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	cmd, pipe := s.cmd, s.pipe
+	s.pipe = nil
+	s.mu.Unlock()
+
+	var err error
+	if pipe != nil {
+		pipe.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		if kerr := cmd.Process.Kill(); kerr != nil && err == nil {
+			err = kerr
+		}
+		cmd.Wait() // reap the child; exit status is irrelevant here
+	}
+	return err
+}
+
+// roundtrip sends a request and waits for the matching response. Each call
+// registers its own response channel, so concurrent calls on one server
+// cannot consume each other's responses, and writes to the child's stdin
+// are serialized.
 func (s *Server) roundtrip(method string, params any, out any) error {
 	s.mu.Lock()
+	if s.closed || s.pipe == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("mcp %s: not connected", s.Name)
+	}
 	id := s.nextID
 	s.nextID++
 	pipe := s.pipe
+	ch := make(chan rpcResponse, 1)
+	s.pending[id] = ch
 	s.mu.Unlock()
-	if pipe == nil {
-		return fmt.Errorf("mcp %s: not connected", s.Name)
-	}
-	req, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
-	if _, err := pipe.Write(append(req, '\n')); err != nil {
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+	}()
+
+	req, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+	if err != nil {
 		return err
 	}
-	doneCh := s.doneCh()
-	timeout := time.After(30 * time.Second)
-	for {
-		var raw []byte
-		select {
-			case raw = <-s.stdin:
-			case <-timeout:
-				return fmt.Errorf("mcp %s: %s: timeout", s.Name, method)
-			case <-doneCh:
-				return fmt.Errorf("mcp %s: server closed", s.Name)
-		}
-		var resp rpcResponse
-		if json.Unmarshal(raw, &resp) != nil || resp.ID != id {
-			continue
-		}
+	s.writeMu.Lock()
+	_, werr := pipe.Write(append(req, '\n'))
+	s.writeMu.Unlock()
+	if werr != nil {
+		return fmt.Errorf("mcp %s: %s: %w", s.Name, method, werr)
+	}
+
+	select {
+	case resp := <-ch:
 		if resp.Error != nil {
 			return fmt.Errorf("mcp %s: %s: %s", s.Name, method, resp.Error.Message)
 		}
 		return json.Unmarshal(resp.Result, out)
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("mcp %s: %s: timeout", s.Name, method)
+	case <-s.done:
+		return fmt.Errorf("mcp %s: %s: %s", s.Name, method, s.readErrorLocked())
 	}
 }
 
-func (s *Server) doneCh() chan struct{} {
+// Tools returns the discovered tool definitions.
+func (s *Server) Tools() []ToolDef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.done
+	return s.tools
 }
-
-// Tools returns the discovered tool definitions.
-func (s *Server) Tools() []ToolDef { return s.tools }
 
 // Call executes one tool and returns its text output.
 func (s *Server) Call(name string, args map[string]any) (string, error) {

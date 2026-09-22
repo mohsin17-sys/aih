@@ -141,39 +141,51 @@ func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agen
 
 	// MCP servers: connected in parallel with an overall budget;
 	// failures and timeouts are non-fatal — one bad server must
-	// never kill (or stall) the session.
+	// never kill (or stall) the session. Servers marked
+	// enabled = false in config are skipped entirely.
 	type mcpResult struct {
 		name string
 		srv  *mcp.Server
 		err  error
 	}
 	ch := make(chan mcpResult, len(cfg.MCP.Servers))
+	launched := 0
 	for name, s := range cfg.MCP.Servers {
 		if s.Command == "" {
 			continue
 		}
+		if s.Enabled != nil && !*s.Enabled {
+			continue
+		}
+		launched++
 		go func(name, command string, args, env []string, trusted bool) {
 			srv := &mcp.Server{Name: name, Command: command, Args: args, Env: env, Trusted: trusted}
 			ch <- mcpResult{name, srv, srv.Connect()}
 		}(name, s.Command, s.Args, s.Env, s.Trusted)
 	}
+	var servers []*mcp.Server
 	budget := time.After(45 * time.Second)
-	for i := 0; i < len(cfg.MCP.Servers); i++ {
+	for i := 0; i < launched; i++ {
 		select {
 			case r := <-ch:
 				if r.err != nil {
 					fmt.Fprintf(os.Stderr, "friday: mcp %s disabled: %v\n", r.name, r.err)
 					continue
 				}
-				for k, v := range agent.MCPTools(r.srv) {
-					tools[k] = v
-				}
+				servers = append(servers, r.srv)
 			case <-budget:
 				fmt.Fprintf(os.Stderr, "friday: mcp connect budget exceeded, continuing without remaining servers\n")
 				goto done
 		}
 	}
-	done:
+done:
+	// Expose every connected server through the dispatch pair
+	// (mcp_list_tools / mcp_call) instead of one schema per remote
+	// tool: the per-request prompt stays constant no matter how many
+	// tools the servers advertise.
+	for k, v := range agent.MCPDispatchTools(servers) {
+		tools[k] = v
+	}
 
 	// Pre-flight: validate every tool's schema.
 	// Tools that fail validation are disabled with a stderr warning.
@@ -187,6 +199,13 @@ func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agen
 		Tools:    tools,
 		WorkDir:  wd,
 		Messages: []providers.Message{{Role: "system", Content: agent.SystemPrompt}},
+	}
+
+	// Terminate the MCP child processes when the session ends.
+	ag.Shutdown = func() {
+		for _, srv := range servers {
+			srv.Close()
+		}
 	}
 
 	if approver != nil {

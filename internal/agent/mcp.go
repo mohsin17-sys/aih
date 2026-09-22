@@ -2,47 +2,111 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"aiharness/internal/mcp"
 )
 
-// MCPTools converts a connected MCP server's tools into ToolHandlers.
+// MCPDispatchTools exposes connected MCP servers through two generic tools
+// (mcp_list_tools and mcp_call) instead of one definition per remote tool.
+// One schema per remote tool dominated the per-request prompt (measured:
+// 38 MCP schemas cost ~8k tokens every round); the dispatch pair keeps that
+// cost constant regardless of how many tools the servers advertise.
 //
-// Safety: every MCP tool is Sensitive by default (hits the approval gate),
-// because an MCP server is arbitrary configured code. Servers marked
-// trusted in config are exempted.
-func MCPTools(srv *mcp.Server) map[string]*ToolHandler {
-	out := map[string]*ToolHandler{}
-	for _, t := range srv.Tools() {
-		sanitized := SanitizeSchema(t.InputSchema)
-		// Extract properties and required from the sanitized schema
-		// The MCP InputSchema is already a complete schema object, so we need to
-		// pull out the properties map and required list for ToolHandler
-		params := map[string]any{}
-		var required []string
-		if props, ok := sanitized["properties"].(map[string]any); ok {
-			params = props
-		}
-		if req, ok := sanitized["required"].([]string); ok {
-			required = req
-		}
-		tool := &ToolHandler{
-			Name:        "mcp_" + srv.Name + "_" + t.Name,
-			Description: "(" + srv.Name + ") " + t.Description,
-			Parameters:  params,
-			Required:    required,
-			Sensitive:   !srv.Trusted,
-			Run: func(tc ToolContext, args map[string]any) (string, error) {
-				res, err := srv.Call(t.Name, args)
-				if err != nil {
-					return "", err
-				}
-				return res, nil
-			},
-		}
-		out[tool.Name] = tool
+// Safety: calls to servers not marked trusted in config require approval
+// (decided per call, since the server is only known at Run time).
+func MCPDispatchTools(servers []*mcp.Server) map[string]*ToolHandler {
+	byName := map[string]*mcp.Server{}
+	for _, s := range servers {
+		byName[s.Name] = s
 	}
-	return out
+	list := &ToolHandler{
+		Name:        "mcp_list_tools",
+		Description: "List the tools available on the connected MCP servers. For each tool: server name, tool name, one-line description, and required parameter names. Call this before mcp_call.",
+		Parameters: map[string]any{
+			"server": map[string]any{"type": "string", "description": "Optional: restrict the listing to one MCP server by name"},
+		},
+		Sensitive: false,
+		Run: func(tc ToolContext, args map[string]any) (string, error) {
+			filter, _ := args["server"].(string)
+			var b strings.Builder
+			for _, s := range servers {
+				if filter != "" && s.Name != filter {
+					continue
+				}
+				for _, t := range s.Tools() {
+					fmt.Fprintf(&b, "%s | %s | %s | required: %s\n",
+						s.Name, t.Name, firstLine(t.Description), strings.Join(requiredParams(t.InputSchema), ", "))
+				}
+			}
+			if b.Len() == 0 {
+				return "no MCP tools available", nil
+			}
+			return b.String(), nil
+		},
+	}
+	call := &ToolHandler{
+		Name:        "mcp_call",
+		Description: "Call one MCP tool. Use mcp_list_tools first to discover the server, tool name and required parameters; pass arguments as a JSON object matching that tool's parameters.",
+		Parameters: map[string]any{
+			"server":    map[string]any{"type": "string", "description": "MCP server name (from mcp_list_tools)"},
+			"tool":      map[string]any{"type": "string", "description": "Tool name on that server"},
+			"arguments": map[string]any{"type": "object", "description": "Tool arguments as a JSON object"},
+		},
+		Required: []string{"server", "tool", "arguments"},
+		// Untrusted servers keep the approval gate; the server is only
+		// known once the model supplies it, so sensitivity is per call.
+		SensitiveFn: func(args map[string]any) bool {
+			s := byName[serverArg(args)]
+			return s == nil || !s.Trusted
+		},
+		Run: func(tc ToolContext, args map[string]any) (string, error) {
+			srvName := serverArg(args)
+			toolName, _ := args["tool"].(string)
+			s := byName[srvName]
+			if s == nil {
+				return "", fmt.Errorf("unknown MCP server %q — call mcp_list_tools to see the available servers", srvName)
+			}
+			var toolArgs map[string]any
+			if v, ok := args["arguments"]; ok && v != nil {
+				toolArgs, ok = v.(map[string]any)
+				if !ok {
+					return "", fmt.Errorf("arguments must be a JSON object")
+				}
+			}
+			for _, t := range s.Tools() {
+				if t.Name == toolName {
+					return s.Call(toolName, toolArgs)
+				}
+			}
+			return "", fmt.Errorf("unknown tool %q on MCP server %q — call mcp_list_tools to see its tools", toolName, srvName)
+		},
+	}
+	return map[string]*ToolHandler{"mcp_list_tools": list, "mcp_call": call}
+}
+
+func serverArg(args map[string]any) string {
+	name, _ := args["server"].(string)
+	return name
+}
+
+// requiredParams pulls the required parameter names out of a raw inputSchema.
+func requiredParams(raw json.RawMessage) []string {
+	var s struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	return s.Required
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 // sanitizeSchema converts an MCP inputSchema into strict JSON-Schema

@@ -31,6 +31,9 @@ type Config struct {
 			Args    []string `toml:"args"`
 			Env     []string `toml:"env"`
 			Trusted bool     `toml:"trusted"`
+			// Enabled defaults to true; set enabled = false to skip a
+			// server entirely (not spawned, not exposed to the model).
+			Enabled *bool `toml:"enabled"`
 		} `toml:"servers"`
 	} `toml:"mcp"`
 	UI struct {

@@ -80,7 +80,7 @@ func (m *Mistral) Chat(ctx context.Context, msgs []Message, tools []Tool) (*Chat
 			case <-time.After(wait):
 			}
 		}
-		res, err := m.chatOnce(msgs, tools)
+		res, err := m.chatOnce(ctx, msgs, tools)
 		if err == nil {
 			return res, nil
 		}
@@ -121,7 +121,7 @@ func retryable(err error) bool {
 	return false
 }
 
-func (m *Mistral) chatOnce(msgs []Message, tools []Tool) (*ChatResult, error) {
+func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*ChatResult, error) {
 	payload := map[string]any{"model": m.Model, "messages": msgs}
 	if len(tools) > 0 {
 		payload["tools"] = tools
@@ -131,6 +131,9 @@ func (m *Mistral) chatOnce(msgs []Message, tools []Tool) (*ChatResult, error) {
 		os.WriteFile("/tmp/friday-debug.json", body, 0644)
 	}
 	req, _ := http.NewRequest("POST", "https://api.mistral.ai/v1/chat/completions", bytes.NewBuffer(body))
+	// propagate cancellation so Ctrl-C / context deadlines abort the
+	// in-flight request instead of hanging for the full HTTP timeout
+	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+m.Key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.HTTP.Do(req)

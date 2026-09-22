@@ -23,7 +23,16 @@ var readOnlyCommands = map[string]bool{
 	"df": true, "du": true, "free": true, "uptime": true, "pwd": true,
 	"whoami": true, "date": true, "uname": true, "echo": true,
 	"which": true, "file": true, "stat": true, "env": true,
-	"git": true, // status/log/diff are the common cases; see note below
+}
+
+// gitReadOnlySubcommands: git as a whole is NOT read-only (push, reset,
+// clean, checkout can all destroy or publish work), so only these
+// subcommands count as read-only.
+var gitReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "tag": true, "rev-parse": true, "ls-files": true,
+	"remote": true, "blame": true, "describe": true, "shortlog": true,
+	"grep": true,
 }
 
 // hardBlockPatterns are refused even if the user approves. These are the
@@ -53,6 +62,16 @@ func isReadOnly(cmdStr string) bool {
 		}
 		if i >= len(fields) {
 			return false
+		}
+		if fields[i] == "git" {
+			// git is only read-only for known-safe subcommands
+			// (git push / reset / clean / checkout ... are not)
+			if i+1 >= len(fields) || fields[i+1] == "" ||
+				strings.HasPrefix(fields[i+1], "-") ||
+				!gitReadOnlySubcommands[fields[i+1]] {
+				return false
+			}
+			continue
 		}
 		if !readOnlyCommands[fields[i]] {
 			return false

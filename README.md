@@ -121,6 +121,23 @@ Your Mistral API key comes from the environment:
 export MISTRAL_API_KEY="..."       # add to ~/.bashrc / ~/.zshrc
 ```
 
+### MCP servers
+
+Each `[[mcp.servers.NAME]]` entry in config spawns an MCP server over stdio
+(MCP servers are arbitrary configured code — see the approval table for how
+they are gated). FRIDAY exposes *all* connected servers through two tools
+only — `mcp_list_tools` and `mcp_call` — so the tool definitions sent to the
+planner stay tiny no matter how many tools the servers advertise:
+
+```
+[mcp.servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+trusted = true        # no per-call approval for this server
+enabled = true        # optional, default true; set false to skip the
+                      # server entirely (not spawned, not exposed)
+```
+
 ## Usage
 
 **Interactive TUI (the normal way):**
@@ -263,9 +280,12 @@ result line says `(timed out after 30s; partial output above)`.
 pattern (see the approval table). FRIDAY refuses unrecoverable destruction
 outright; rephrase the task (e.g. delete a *specific* path, not `/`).
 
-**Text selection / copying in the TUI doesn't work** — hold **Shift** while
-dragging to select (bypasses the TUI's keyboard handling in most terminals).
-For long outputs you need to copy, use headless mode instead:
+**Text selection / copying in the TUI** — drag with the left button to
+select (release to copy to the clipboard via OSC 52; tmux is handled).
+Hold the button and use the scroll wheel to extend the selection past the
+visible screen — the view scrolls with it, like a native terminal. Hold
+**Shift** while dragging instead to use your terminal emulator's own
+selection. For long outputs you need to copy, headless mode also works:
 `friday -e "..."` prints plain scrolling text.
 
 **Weird characters or clipped output** — long answers are word-wrapped to

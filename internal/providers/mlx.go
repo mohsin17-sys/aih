@@ -63,7 +63,9 @@ func (m *MLX) CompleteWithUsage(system, user string) (*MLXResult, error) {
 			CompletionTokens int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	json.NewDecoder(resp.Body).Decode(&out)
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("mlx: decode response: %w", err)
+	}
 	if len(out.Choices) == 0 {
 		return nil, fmt.Errorf("mlx: no choices")
 	}

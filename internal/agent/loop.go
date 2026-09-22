@@ -35,6 +35,11 @@ type Agent struct {
 	// Session telemetry
 	TokensIn  int `json:"tokens_in"`
 	TokensOut int `json:"tokens_out"`
+
+	// Shutdown, when non-nil, releases resources held by the agent
+	// (e.g. spawned MCP server processes). Callers must invoke it once
+	// the session ends.
+	Shutdown func()
 }
 
 // record appends an event and streams it if an emitter is attached.
@@ -76,7 +81,18 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 
 	for _, call := range assistantMsg.ToolCalls {
 		var args map[string]any
-		json.Unmarshal([]byte(call.Function.Arguments), &args)
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			// report the parse failure to the model instead of running
+			// the tool with silently-empty arguments
+			a.record(Event{Type: "error", Tool: call.Function.Name, Result: "invalid arguments JSON: " + err.Error()})
+			a.Messages = append(a.Messages, providers.Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Name:       call.Function.Name,
+				Content:    "ERROR: invalid arguments JSON: " + err.Error(),
+			})
+			continue
+		}
 		a.record(Event{Type: "tool_call", Tool: call.Function.Name, Args: args})
 
 		result, err := a.runTool(ctx, call.Function.Name, args)
@@ -120,6 +136,9 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) (
 		if cmd, ok := args["command"].(string); ok {
 			sensitive = ShouldPrompt(cmd)
 		}
+	}
+	if t.SensitiveFn != nil {
+		sensitive = t.SensitiveFn(args)
 	}
 	if sensitive && a.Approve != nil {
 		if !a.Approve(ApprovalRequest{Tool: name, Args: args}) {

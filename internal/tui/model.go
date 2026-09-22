@@ -4,17 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"aiharness/config"
 	"aiharness/internal/agent"
 	"aiharness/internal/app"
 	"aiharness/internal/providers"
-
-	"net/http"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -124,7 +125,8 @@ type Model struct {
 	width, height int
 	input         textinput.Model
 	vp            viewport.Model
-	transcript    string // copy-safe
+	lines         []string // styled transcript lines (copy-safe)
+	sel           selection
 
 	ag     *agent.Agent
 	events chan agent.Event
@@ -281,6 +283,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		m.handleMouse(msg)
+		return m, nil
+
 	case tea.KeyMsg:
 		// approval prompt takes priority over all other keys
 		if m.pending != nil {
@@ -393,18 +399,30 @@ func (m *Model) renderEvent(ev agent.Event) {
 
 // appendTranscript adds styled content and refreshes the viewport.
 func (m *Model) appendTranscript(styled string) {
-	m.transcript += styled
-	m.vp.SetContent(m.transcript)
-	m.vp.GotoBottom()
+	m.lines = append(m.lines, strings.Split(styled, "\n")...)
+	m.refreshView()
 }
 
-// layout sizes the viewport after a resize.
+// refreshView rebuilds the viewport content (with any selection highlight).
+// While a selection drag is in progress the view stays pinned where the user
+// scrolled it; otherwise new content keeps the view at the bottom.
+func (m *Model) refreshView() {
+	m.vp.SetContent(m.renderContent())
+	if !m.sel.active {
+		m.vp.GotoBottom()
+	}
+}
+
+// layout sizes the viewport after a resize. The frame around the viewport
+// needs 8 rows (2 borders, title, 3 input rows, status line), so the
+// viewport gets height-8; anything larger pushes the top of the frame
+// (title and border) off-screen and breaks mouse-coordinate mapping.
 func (m *Model) layout() {
 	leftWidth := m.width - sidePanelWidth - 4
 	if leftWidth < 20 {
 		leftWidth = 20
 	}
-	vpHeight := m.height - 6
+	vpHeight := m.height - 8
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
@@ -599,7 +617,24 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	// Mouse cell motion is required for in-app selection and wheel
+	// scrolling (hold Shift to bypass capture and use the terminal's
+	// native selection).
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+
+	// bubbletea traps SIGINT/SIGTERM but not SIGHUP; without this,
+	// closing the terminal would orphan the spawned MCP servers.
+	sigHUP := make(chan os.Signal, 1)
+	signal.Notify(sigHUP, syscall.SIGHUP)
+	defer signal.Stop(sigHUP)
+	go func() {
+		<-sigHUP
+		p.Quit()
+	}()
+
 	_, err = p.Run()
+	if model.ag != nil && model.ag.Shutdown != nil {
+		model.ag.Shutdown() // terminate spawned MCP servers on exit
+	}
 	return err
 }

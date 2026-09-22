@@ -38,7 +38,10 @@ func JevRouteTool() *ToolHandler {
 			if status < 200 || status >= 300 {
 				return "", fmt.Errorf("jev HTTP %d", status)
 			}
-			ans := resp.Answers["selected_tool"]
+			ans, ok := resp.Answers["selected_tool"]
+		if !ok {
+			return "", fmt.Errorf("jev response missing the selected_tool answer")
+		}
 			var probs []string
 			for t, p := range ans.Probabilities {
 				probs = append(probs, fmt.Sprintf("%s=%.2f", t, p))

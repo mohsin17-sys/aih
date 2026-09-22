@@ -30,8 +30,18 @@ auto_approve_shell = false
 max_cost_usd = 5.0
 
 [mcp]
-# Reserved for MCP server integrations.
+# MCP servers: each entry spawns a stdio MCP server. All connected servers
+# are exposed to the planner through two generic tools (mcp_list_tools and
+# mcp_call), keeping the request size small regardless of how many tools
+# the servers advertise.
 [mcp.servers]
+
+# Example server:
+# [mcp.servers.example]
+# command = "npx"
+# args = ["-y", "@example/mcp-server"]
+# trusted = false   # per-call approval required (default)
+# enabled = true    # optional, default true; false skips the server entirely
 
 [ui]
 # Reserved for theme selection.

@@ -26,6 +26,9 @@ type ToolHandler struct {
 	Parameters  map[string]any
 	Required    []string
 	Sensitive   bool
+	// SensitiveFn, when set, decides per call whether the approval gate
+	// applies (for tools whose sensitivity depends on their arguments).
+	SensitiveFn func(args map[string]any) bool
 	Run         func(tc ToolContext, args map[string]any) (string, error)
 }
 
