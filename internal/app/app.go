@@ -2,10 +2,118 @@
 package app
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
 	"aiharness/config"
 	"aiharness/internal/agent"
+	"aiharness/internal/mcp"
 	"aiharness/internal/providers"
 )
+
+// toolValidationResult holds the result of validating one tool's schema.
+type toolValidationResult struct {
+	name    string
+	valid   bool
+	errMsg  string
+}
+
+// validateSchema checks if a tool's schema is valid for Mistral's API.
+// Returns an error message if invalid, empty string if valid.
+func validateSchema(toolDef providers.Tool) string {
+	// Marshal the tool definition to check its structure
+	body, err := json.Marshal(toolDef)
+	if err != nil {
+		return err.Error()
+	}
+	
+	// Unmarshal to check structure
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return err.Error()
+	}
+	
+	// Check that function exists and is valid
+	funcMap, ok := parsed["function"].(map[string]any)
+	if !ok {
+		return "missing or invalid 'function' field"
+	}
+	
+	// Check parameters exists and is valid
+	paramsRaw, ok := funcMap["parameters"].(map[string]any)
+	if !ok {
+		// parameters might be json.RawMessage which unmarshaled as map or other type
+		// Try to check if it's at least present
+		if _, hasParams := funcMap["parameters"]; !hasParams {
+			return "missing 'parameters' field in function"
+		}
+		// If we can't parse it, that's okay - it might be valid raw JSON
+		return ""
+	}
+	
+	// Check for nested properties (the double-wrapping issue)
+	if props, ok := paramsRaw["properties"].(map[string]any); ok {
+		// Check if properties itself has a properties field (double nesting)
+		if _, hasNestedProps := props["properties"]; hasNestedProps {
+			return "nested 'properties' detected in schema"
+		}
+		// Also check that properties doesn't have type: "object" at this level
+		// (it should only have property definitions)
+		if typ, hasType := props["type"]; hasType {
+			if t, ok := typ.(string); ok && t == "object" {
+				return "'properties' should not have type: object"
+			}
+		}
+		// Check if properties has required at this level (should be at parent level)
+		if _, hasRequired := props["required"]; hasRequired {
+			// This might be okay depending on context
+		}
+	}
+	
+	return ""
+}
+
+// validateTools validates all tools' schemas locally.
+// Tools that fail validation are removed from the tools map and a warning is printed.
+func validateTools(tools map[string]*agent.ToolHandler) {
+	// Channel for results
+	ch := make(chan toolValidationResult, len(tools))
+	
+	// Use a wait group to wait for all validations
+	var wg sync.WaitGroup
+	
+	for name, tool := range tools {
+		wg.Add(1)
+		go func(name string, tool *agent.ToolHandler) {
+			defer wg.Done()
+			
+			// Validate the schema locally
+			if errMsg := validateSchema(tool.Definition()); errMsg != "" {
+				ch <- toolValidationResult{name: name, valid: false, errMsg: errMsg}
+				return
+			}
+			
+			ch <- toolValidationResult{name: name, valid: true, errMsg: ""}
+		}(name, tool)
+	}
+	
+	// Close channel when all validations are done
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+	
+	// Process results and disable invalid tools
+	for result := range ch {
+		if !result.valid {
+			delete(tools, result.name)
+			fmt.Fprintf(os.Stderr, "friday: tool %s disabled: schema validation failed: %s\n", result.name, result.errMsg)
+		}
+	}
+}
 
 // NewAgent builds a fully-equipped Agent for the given working directory.
 // approver: if non-nil, it is used for every write/command approval (the TUI
@@ -29,6 +137,49 @@ func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agen
 	if cfg.Editor.BaseURL != "" {
 		mlx := providers.NewMLX(cfg.Editor.BaseURL, cfg.Editor.Model)
 		tools["generate_edit"] = agent.GenerateEditTool(mlx)
+	}
+
+	// MCP servers: connected in parallel with an overall budget;
+	// failures and timeouts are non-fatal — one bad server must
+	// never kill (or stall) the session.
+	type mcpResult struct {
+		name string
+		srv  *mcp.Server
+		err  error
+	}
+	ch := make(chan mcpResult, len(cfg.MCP.Servers))
+	for name, s := range cfg.MCP.Servers {
+		if s.Command == "" {
+			continue
+		}
+		go func(name, command string, args, env []string, trusted bool) {
+			srv := &mcp.Server{Name: name, Command: command, Args: args, Env: env, Trusted: trusted}
+			ch <- mcpResult{name, srv, srv.Connect()}
+		}(name, s.Command, s.Args, s.Env, s.Trusted)
+	}
+	budget := time.After(45 * time.Second)
+	for i := 0; i < len(cfg.MCP.Servers); i++ {
+		select {
+			case r := <-ch:
+				if r.err != nil {
+					fmt.Fprintf(os.Stderr, "friday: mcp %s disabled: %v\n", r.name, r.err)
+					continue
+				}
+				for k, v := range agent.MCPTools(r.srv) {
+					tools[k] = v
+				}
+			case <-budget:
+				fmt.Fprintf(os.Stderr, "friday: mcp connect budget exceeded, continuing without remaining servers\n")
+				goto done
+		}
+	}
+	done:
+
+	// Pre-flight: validate every tool's schema.
+	// Tools that fail validation are disabled with a stderr warning.
+	// This runs in parallel to avoid slowing down startup.
+	if len(tools) > 0 {
+		validateTools(tools)
 	}
 
 	ag := &agent.Agent{

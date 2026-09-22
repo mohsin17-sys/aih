@@ -27,7 +27,10 @@ type Config struct {
 	} `toml:"safety"`
 	MCP struct {
 		Servers map[string]struct {
-			Command string `toml:"command"`
+			Command string   `toml:"command"`
+			Args    []string `toml:"args"`
+			Env     []string `toml:"env"`
+			Trusted bool     `toml:"trusted"`
 		} `toml:"servers"`
 	} `toml:"mcp"`
 	UI struct {

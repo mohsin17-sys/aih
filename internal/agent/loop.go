@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"os"
 	"fmt"
 
 	"aiharness/internal/providers"
@@ -56,7 +58,7 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 	for _, t := range a.Tools {
 		tools = append(tools, t.Definition())
 	}
-	res, err := a.Planner.Chat(a.Messages, tools)
+	res, err := a.Planner.Chat(ctx, a.Messages, tools)
 	if err != nil {
 		return false, err
 	}
@@ -87,7 +89,7 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 			msg.Content = "ERROR: " + err.Error()
 			a.record(Event{Type: "error", Tool: call.Function.Name, Result: err.Error()})
 		} else {
-			msg.Content = result
+			msg.Content = a.trimResult(result)
 			a.record(Event{Type: "tool_result", Tool: call.Function.Name, Result: result})
 		}
 		a.Messages = append(a.Messages, msg)
@@ -125,4 +127,27 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) (
 		}
 	}
 	return t.Run(ToolContext{WorkDir: a.WorkDir, Emit: a.record}, args)
+}
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// trimResult ages tool results out of the MODEL context (the audit
+// log keeps full text). Once the conversation exceeds the round
+// threshold, result bodies are capped to stop quadratic token growth.
+func (a *Agent) trimResult(s string) string {
+	if len(a.Messages) <= envInt("FRIDAY_CTX_MAXMSGS", 12) {
+		return s
+	}
+	cap := envInt("FRIDAY_CTX_RESULTCAP", 500)
+	if len(s) <= cap {
+		return s
+	}
+	return s[:cap] + "\n…[truncated; full text preserved in session log]"
 }
