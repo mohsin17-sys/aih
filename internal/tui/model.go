@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -106,7 +107,7 @@ func branding() string {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString(footerStyle.Render("        " + footerText()) + "\n\n")
+	b.WriteString(footerStyle.Render("        "+footerText()) + "\n\n")
 	return b.String()
 }
 
@@ -146,7 +147,7 @@ type Model struct {
 	quitting     bool
 
 	// telemetry
-	tokensIn     int
+	tokensIn      int
 	tokensOut     int
 	editorGens    int
 	editorMsTotal int64
@@ -156,17 +157,36 @@ type Model struct {
 	// plannerLabel is the configured planner model, shortened for the
 	// status bar (e.g. "Josiefied-Qwen3-8B-…").
 	plannerLabel string
+
+	// auto is the live autonomous-mode state, shared with the agent
+	// goroutine's approver closure: ON = auto-approve everything,
+	// OFF = interactive y/n prompts. Toggled with F2 or the "/auto"
+	// command; initialized from safety.auto_approve_all.
+	auto *atomic.Bool
 }
 
-// New builds the TUI model with a live agent and an interactive approver.
+// New builds the TUI model with a live agent and an approval gate whose
+// behavior (autonomous vs interactive) is decided live from m.auto —
+// toggled with F2 or the "/auto" command during the session.
 func New(wd string) (Model, error) {
 	reqs := make(chan agent.ApprovalRequest)
 	res := make(chan bool)
 
-	ag, err := app.NewAgent(wd, func(r agent.ApprovalRequest) bool {
+	cfg, cfgErr := config.Load()
+
+	autoState := &atomic.Bool{}
+	if cfgErr == nil {
+		autoState.Store(cfg.Safety.AutoApproveAll)
+	}
+	approver := func(r agent.ApprovalRequest) bool {
+		if autoState.Load() {
+			return true
+		}
 		reqs <- r
 		return <-res
-	})
+	}
+
+	ag, err := app.NewAgent(wd, approver)
 	if err != nil {
 		return Model{}, err
 	}
@@ -178,7 +198,7 @@ func New(wd string) (Model, error) {
 	ti.Focus()
 
 	label := "planner"
-	if cfg, err := config.Load(); err == nil {
+	if cfgErr == nil {
 		label = shortModel(cfg.Planner.Model)
 	}
 
@@ -187,6 +207,7 @@ func New(wd string) (Model, error) {
 		vp:           viewport.New(0, 0),
 		ag:           ag,
 		plannerLabel: label,
+		auto:         autoState,
 		events:       make(chan agent.Event, 64),
 		approvalReqs: reqs,
 		approvalRes:  res,
@@ -204,6 +225,21 @@ func shortModel(id string) string {
 		id = id[i+1:]
 	}
 	return clip(id, 26)
+}
+
+// toggleAuto flips autonomous mode at runtime and reports the new state
+// in the transcript. The gate closure reads the same atomic, so the change
+// applies to every approval decision from this moment on — even mid-task.
+func (m *Model) toggleAuto() {
+	on := m.auto.CompareAndSwap(false, true)
+	if !on {
+		on = m.auto.CompareAndSwap(true, false)
+	}
+	if on {
+		m.appendTranscript(okStyle.Render("⚙ auto mode ON — running without approval prompts (hard-blocked destruction still refused)") + "\n\n")
+	} else {
+		m.appendTranscript(askStyle.Render("⚙ auto mode OFF — writes, commands and untrusted MCP calls will prompt again") + "\n\n")
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -311,6 +347,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// F2 toggles autonomous mode at any time, even mid-task: it
+		// changes the gate for every future approval decision.
+		if msg.Type == tea.KeyF2 {
+			m.toggleAuto()
+			return m, nil
+		}
+
 		// approval prompt takes priority over all other keys
 		if m.pending != nil {
 			switch strings.ToLower(msg.String()) {
@@ -347,8 +390,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			}
+			if line == "/auto" {
+				m.toggleAuto()
+				return m, nil
+			}
 			m.ag.Messages = append(m.ag.Messages, providers.Message{Role: "user", Content: line})
-			m.appendTranscript(userStyle.Render("you: ")+clip(line, maxInt(10, m.clipWidth)) + "\n")
+			m.appendTranscript(userStyle.Render("you: ") + clip(line, maxInt(10, m.clipWidth)) + "\n")
 			m.thinking = true
 			m.input.Blur()
 			m.ag.Emit = func(ev agent.Event) { m.events <- ev }
@@ -404,19 +451,19 @@ func (m *Model) renderEvent(ev agent.Event) {
 		if ev.Tool == "qwen" {
 			m.editorGens++
 			var ms int64
-				switch v := ev.Args["ms"].(type) {
-				case int:
-					ms = int64(v)
-				case int64:
-					ms = v
-				case float64:
-					ms = int64(v)
-				}
-				m.editorMsTotal += ms
+			switch v := ev.Args["ms"].(type) {
+			case int:
+				ms = int64(v)
+			case int64:
+				ms = v
+			case float64:
+				ms = int64(v)
+			}
+			m.editorMsTotal += ms
 		} else {
 			m.tokensIn += in
 			m.tokensOut += out
-			}
+		}
 	}
 }
 
@@ -488,13 +535,16 @@ func (m Model) View() string {
 		dot = "●"
 	}
 	statusLeft := "friday ▸ " + m.plannerLabel + " ▸ editor " + dot
+	if m.auto != nil && m.auto.Load() {
+		statusLeft = "friday ▸ " + m.plannerLabel + " ▸ editor " + dot + " ▸ auto"
+	}
 	if m.pending != nil {
 		statusLeft = askStyle.Render("🔑 approval needed: y / n")
 	} else if m.thinking {
 		statusLeft = thinkStyle.Render("⏳ thinking…")
 	}
 	footer := footerStyle.Render(footerText())
-	status := statusStyle.Render(" " + statusLeft) +
+	status := statusStyle.Render(" "+statusLeft) +
 		strings.Repeat(" ", maxInt(1, m.width-lipgloss.Width(statusLeft)-lipgloss.Width(footer)-2)) +
 		footer
 
@@ -598,17 +648,17 @@ func wrap(s string, n int) string {
 		line := ""
 		for _, word := range strings.Fields(para) {
 			switch {
-				case line == "":
-					line = word
-				case len([]rune(line))+1+len([]rune(word)) <= n:
-					line += " " + word
-				default:
-					out = append(out, line)
-					line = word
-				}
+			case line == "":
+				line = word
+			case len([]rune(line))+1+len([]rune(word)) <= n:
+				line += " " + word
+			default:
+				out = append(out, line)
+				line = word
 			}
-			out = append(out, line)
 		}
+		out = append(out, line)
+	}
 	return strings.Join(out, "\n")
 }
 

@@ -224,9 +224,18 @@ done:
 		}
 	}
 
-	if approver != nil {
+	switch {
+	case approver != nil:
+		// A caller-supplied gate (the TUI) always wins; it may check
+		// volatile state and flip behavior at runtime.
 		ag.Approve = approver
-	} else {
+	case cfg.Safety.AutoApproveAll:
+		// Config-level autonomous mode (headless default): no approval
+		// gate on anything. Hard-blocked destructive command patterns
+		// still refuse at execution time (shell.go), and everything
+		// lands in the audit trail as usual.
+		ag.Approve = func(agent.ApprovalRequest) bool { return true }
+	default:
 		ag.Approve = func(r agent.ApprovalRequest) bool {
 			return (r.Tool == "write_file" && cfg.Safety.AutoApproveWrite) ||
 				(r.Tool == "run_command" && cfg.Safety.AutoApproveShell)

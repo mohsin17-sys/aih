@@ -182,7 +182,17 @@ JSON event per line, safe to `grep`, `jq`, or commit to git.
 
 ## The approval system
 
-Three safety tiers for shell commands:
+`safety.auto_approve_all = true` in config switches FRIDAY into fully
+autonomous mode: no approval prompts anywhere — not in the TUI, not
+headless. Writes, shell commands, and calls to untrusted MCP servers all
+execute; each session's audit trail (`.aih/sessions/*.jsonl`) is the
+record. In the TUI the status line shows an `auto` badge so you always
+know the gates are off. In the TUI you can also flip it live at any time
+— even mid-task — with **F2** or by typing **`/auto`**; the change applies
+to every approval decision from that moment on. The only thing still
+refused in every mode is the hard-blocked destruction list below.
+
+Otherwise, three safety tiers for shell commands:
 
 | Tier | Examples | Behavior |
 |---|---|---|

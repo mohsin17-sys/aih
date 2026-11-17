@@ -39,9 +39,14 @@ model = "qwen3:4b-instruct"
 enabled = false
 
 [safety]
-# Headless mode (-e) only. In the interactive TUI you approve
-# everything live; these decide what runs WITHOUT a human present.
-# Keep both false unless you trust the task completely.
+# auto_approve_all = true: fully autonomous in BOTH the TUI and headless
+# mode — no approval prompts for writes, shell commands, or untrusted MCP
+# calls. In the TUI, F2 or the "/auto" command toggles it live at runtime.
+# Hard-blocked destructive command patterns (rm -rf /, mkfs, dd to
+# devices, fork bombs, shutdown) are still refused, and everything lands
+# in the session audit trail.
+auto_approve_all = false
+# Headless-mode (-e) fine-grained fallbacks when auto_approve_all is off:
 auto_approve_write = false
 auto_approve_shell = false
 max_cost_usd = 5.0

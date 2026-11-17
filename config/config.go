@@ -28,7 +28,12 @@ type Config struct {
 	Safety struct {
 		AutoApproveWrite bool    `toml:"auto_approve_write"`
 		AutoApproveShell bool    `toml:"auto_approve_shell"`
-		MaxCostUSD       float64 `toml:"max_cost_usd"`
+		// AutoApproveAll removes every approval gate in both the TUI
+		// and headless mode: writes, shell commands, and calls to
+		// untrusted MCP servers all execute without prompting. Only the
+		// hard-blocked destructive command patterns remain refused.
+		AutoApproveAll bool    `toml:"auto_approve_all"`
+		MaxCostUSD     float64 `toml:"max_cost_usd"`
 	} `toml:"safety"`
 	MCP struct {
 		Servers map[string]struct {
