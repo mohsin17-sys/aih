@@ -119,23 +119,35 @@ func (s *Server) Connect() error {
 }
 
 // readLoop parses server output and routes each response to the pending
-// call with the matching ID. Notifications and malformed lines are ignored.
-// On exit it fails every in-flight call so no roundtrip blocks forever.
+// call with the matching ID. Malformed lines are ignored. On exit it
+// fails every in-flight call so no roundtrip blocks forever.
 func (s *Server) readLoop(stdoutPipe io.Reader) {
 	defer close(s.done)
 	sc := bufio.NewScanner(stdoutPipe)
 	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
-		var resp rpcResponse
-		if json.Unmarshal(sc.Bytes(), &resp) != nil || resp.ID == 0 {
+		var line struct {
+			rpcResponse
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) != nil {
+			continue
+		}
+		// Notifications carry a method and no id.Servers like Serena
+		// swap their toolset mid-session and announce the change.
+		if line.Method == "notifications/tools/list_changed" {
+			go s.refreshTools()
+			continue
+		}
+		if line.ID == 0 {
 			continue
 		}
 		s.mu.Lock()
-		ch, ok := s.pending[resp.ID]
-		delete(s.pending, resp.ID)
+		ch, ok := s.pending[line.ID]
+		delete(s.pending, line.ID)
 		s.mu.Unlock()
 		if ok {
-			ch <- resp // buffered; exactly one delivery per ID
+			ch <- line.rpcResponse // buffered; exactly one delivery per ID
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -144,6 +156,41 @@ func (s *Server) readLoop(stdoutPipe io.Reader) {
 		s.mu.Unlock()
 	}
 	s.failAll()
+}
+
+// refreshTools re-queries the server's tool list into the cache. Called
+// on tools/list_changed notifications and whenever a caller needs a
+// fresh listing (mcp_list_tools); failures keep the previous cache.
+func (s *Server) refreshTools() {
+	var listRes struct {
+		Tools []ToolDef `json:"tools"`
+	}
+	if err := s.roundtrip("tools/list", map[string]any{}, &listRes); err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.tools = listRes.Tools
+	s.mu.Unlock()
+}
+
+// ListTools returns the server's CURRENT tool list, re-querying live so
+// mid-session toolset changes (Serena's onboarding -> full tools after
+// project activation) are always visible. The cache is updated on
+// success; on error the cached list is returned with the error.
+func (s *Server) ListTools() ([]ToolDef, error) {
+	var listRes struct {
+		Tools []ToolDef `json:"tools"`
+	}
+	if err := s.roundtrip("tools/list", map[string]any{}, &listRes); err != nil {
+		s.mu.Lock()
+		cached := s.tools
+		s.mu.Unlock()
+		return cached, err
+	}
+	s.mu.Lock()
+	s.tools = listRes.Tools
+	s.mu.Unlock()
+	return listRes.Tools, nil
 }
 
 // failAll aborts every pending call (server closed or unreadable).

@@ -35,7 +35,15 @@ func MCPDispatchTools(servers []*mcp.Server) map[string]*ToolHandler {
 				if filter != "" && s.Name != filter {
 					continue
 				}
-				for _, t := range s.Tools() {
+				// Live listing: servers like Serena expose more tools
+				// mid-session (e.g. after project activation); on error
+				// fall back to the cached list.
+				tools, err := s.ListTools()
+				if err != nil && len(tools) == 0 {
+					fmt.Fprintf(&b, "%s: unavailable (%v)\n", s.Name, err)
+					continue
+				}
+				for _, t := range tools {
 					fmt.Fprintf(&b, "%s | %s | %s | required: %s\n",
 						s.Name, t.Name, firstLine(t.Description), strings.Join(requiredParams(t.InputSchema), ", "))
 				}
@@ -75,12 +83,14 @@ func MCPDispatchTools(servers []*mcp.Server) map[string]*ToolHandler {
 					return "", fmt.Errorf("arguments must be a JSON object")
 				}
 			}
-			for _, t := range s.Tools() {
-				if t.Name == toolName {
-					return s.Call(toolName, toolArgs)
-				}
+			// The cached list may predate a mid-session toolset change
+			// (Serena swaps in the full toolset after project activation),
+			// so refresh once when the name is unknown before delegating
+			// the final say to the server itself.
+			if !knownTool(s, toolName) {
+				s.ListTools()
 			}
-			return "", fmt.Errorf("unknown tool %q on MCP server %q — call mcp_list_tools to see its tools", toolName, srvName)
+			return s.Call(toolName, toolArgs)
 		},
 	}
 	return map[string]*ToolHandler{"mcp_list_tools": list, "mcp_call": call}
@@ -89,6 +99,16 @@ func MCPDispatchTools(servers []*mcp.Server) map[string]*ToolHandler {
 func serverArg(args map[string]any) string {
 	name, _ := args["server"].(string)
 	return name
+}
+
+// knownTool reports whether the server's cached tool list contains name.
+func knownTool(s *mcp.Server, name string) bool {
+	for _, t := range s.Tools() {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // requiredParams pulls the required parameter names out of a raw inputSchema.

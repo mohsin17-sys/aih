@@ -138,7 +138,10 @@ Each `[[mcp.servers.NAME]]` entry in config spawns an MCP server over stdio
 (MCP servers are arbitrary configured code — see the approval table for how
 they are gated). FRIDAY exposes *all* connected servers through two tools
 only — `mcp_list_tools` and `mcp_call` — so the tool definitions sent to the
-planner stay tiny no matter how many tools the servers advertise:
+planner stay tiny no matter how many tools the servers advertise. Tool
+listings are live: servers that swap their toolset mid-session (Serena
+reveals its REPL after project activation) are re-queried on every
+`mcp_list_tools`, and `tools/list_changed` notifications refresh the cache automatically.
 
 ```
 [mcp.servers.context7]
