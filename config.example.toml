@@ -3,18 +3,35 @@
 # All sections are optional; missing values fall back to safe defaults.
 
 [planner]
-# The Mistral model that plans and drives tool calls.
-provider = "mistral"
-model = "mistral-large-latest"
+# The model that plans and drives tool calls.
+# Two ways to run it:
+#
+#  1. LOCAL / self-hosted, any OpenAI-compatible server (mlx-serve,
+#     Ollama, llama.cpp, vLLM, ...): set base_url (+ optional api_key —
+#     omit or leave empty if the server needs no auth). base_url MUST
+#     include the /v1 suffix, e.g. "http://10.0.0.104:11234/v1".
+#     The server must support OpenAI-style tool calling (tool_calls).
+#     Example — Qwen3.8-9B-heretic (uncensored) on MTPLX on a Mac mini,
+#     exposed tailnet-only via `tailscale serve`:
+provider = "openai"
+base_url = "https://mos-mac-mini.tail2f1a37.ts.net/v1"
+model = "mtplx-qwen35-9b-optimized-speed"
+#     api_key = ""                        # default: none
+#
+#  2. Mistral cloud (fallback): leave base_url empty — FRIDAY then uses
+#     https://api.mistral.ai/v1 with MISTRAL_API_KEY from the environment.
+#       provider = "mistral"
+#       model = "mistral-large-latest"
 
 [editor]
-# Local Qwen model served by mlx-lm (optional).
+# Local editor model for large content generation (generate_edit).
+# Any OpenAI-compatible server; Ollama is the easiest option:
+#   ollama pull qwen3:4b-instruct && ollama serve
 # NOTE: base_url MUST include the /v1 suffix — FRIDAY appends
 #       /chat/completions and /models to this base.
-#       Example: "http://192.168.1.50:8080/v1"
-provider = "mlx"
-base_url = "http://127.0.0.1:8080/v1"
-model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3:4b-instruct"
 
 [jev]
 # Routing orchestrator. If you don't run one, leave false —

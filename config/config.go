@@ -9,8 +9,13 @@ import (
 
 type Config struct {
 	Planner struct {
+		// Provider is informational: any non-empty BaseURL switches the
+		// planner to that OpenAI-compatible server; an empty BaseURL
+		// falls back to the Mistral cloud API with MISTRAL_API_KEY.
 		Provider string `toml:"provider"`
 		Model    string `toml:"model"`
+		BaseURL  string `toml:"base_url"`
+		APIKey   string `toml:"api_key"`
 	} `toml:"planner"`
 	Editor struct {
 		Provider string `toml:"provider"`

@@ -194,8 +194,19 @@ done:
 		validateTools(tools)
 	}
 
+	// Planner: an OpenAI-compatible server when [planner].base_url is set
+	// (e.g. mlx-serve on a Mac mini, Ollama, llama.cpp); otherwise the
+	// Mistral cloud API. Any OpenAI-compatible endpoint works — the wire
+	// protocol (tool_calls, usage) is identical.
+	var planner providers.ChatProvider
+	if cfg.Planner.BaseURL != "" {
+		planner = providers.NewOpenAICompat(cfg.Planner.BaseURL, cfg.Planner.Model, cfg.Planner.APIKey)
+	} else {
+		planner = providers.NewMistral(cfg.Planner.Model)
+	}
+
 	ag := &agent.Agent{
-		Planner:  providers.NewMistral(cfg.Planner.Model),
+		Planner:  planner,
 		Tools:    tools,
 		WorkDir:  wd,
 		Messages: []providers.Message{{Role: "system", Content: agent.SystemPrompt}},

@@ -38,16 +38,39 @@ type ToolCall struct {
 }
 
 type Mistral struct {
-	Model string
-	Key   string
-	HTTP  *http.Client
+	Model   string
+	Key     string
+	BaseURL string
+	HTTP    *http.Client
+}
+
+// ChatProvider is the planner-facing interface: any client that can run
+// one tool-calling chat round. Mistral cloud, mlx-serve, Ollama etc. all
+// satisfy it — the agent loop does not care where the planner runs.
+type ChatProvider interface {
+	Chat(ctx context.Context, msgs []Message, tools []Tool) (*ChatResult, error)
 }
 
 func NewMistral(model string) *Mistral {
 	return &Mistral{
-		Model: model,
-		Key:   os.Getenv("MISTRAL_API_KEY"),
-		HTTP:  &http.Client{Timeout: 120 * time.Second},
+		Model:   model,
+		Key:     os.Getenv("MISTRAL_API_KEY"),
+		BaseURL: "https://api.mistral.ai/v1",
+		HTTP:    &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// NewOpenAICompat builds a chat client for any OpenAI-compatible server
+// (mlx-serve, Ollama, llama.cpp, vLLM, ...) — the wire protocol is the
+// same one the Mistral client speaks. apiKey may be empty when the
+// server requires no authentication (the Authorization header is then
+// omitted). Local servers are allowed longer generations than the API.
+func NewOpenAICompat(baseURL, model, apiKey string) *Mistral {
+	return &Mistral{
+		Model:   model,
+		Key:     apiKey,
+		BaseURL: strings.TrimSuffix(baseURL, "/"),
+		HTTP:    &http.Client{Timeout: 600 * time.Second},
 	}
 }
 
@@ -89,7 +112,16 @@ func (m *Mistral) Chat(ctx context.Context, msgs []Message, tools []Tool) (*Chat
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("mistral: %d attempts failed: %w", attempts, lastErr)
+	return nil, fmt.Errorf("%s: %d attempts failed: %w", m.label(), attempts, lastErr)
+}
+
+// label names the server in error messages ("mistral" for the cloud API,
+// otherwise the model-neutral "planner").
+func (m *Mistral) label() string {
+	if m.BaseURL == "https://api.mistral.ai/v1" {
+		return "mistral"
+	}
+	return "planner"
 }
 
 type retryAfterError struct {
@@ -114,7 +146,7 @@ func retryable(err error) bool {
 		}
 	}
 	for _, code := range []int{429, 500, 502, 503, 504} {
-		if strings.Contains(err.Error(), fmt.Sprintf("mistral HTTP %d:", code)) {
+		if strings.Contains(err.Error(), fmt.Sprintf("HTTP %d:", code)) {
 			return true
 		}
 	}
@@ -130,11 +162,13 @@ func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*
 	if os.Getenv("FRIDAY_DEBUG") == "1" {
 		os.WriteFile("/tmp/friday-debug.json", body, 0644)
 	}
-	req, _ := http.NewRequest("POST", "https://api.mistral.ai/v1/chat/completions", bytes.NewBuffer(body))
+	req, _ := http.NewRequest("POST", m.BaseURL+"/chat/completions", bytes.NewBuffer(body))
 	// propagate cancellation so Ctrl-C / context deadlines abort the
 	// in-flight request instead of hanging for the full HTTP timeout
 	req = req.WithContext(ctx)
-	req.Header.Set("Authorization", "Bearer "+m.Key)
+	if m.Key != "" {
+		req.Header.Set("Authorization", "Bearer "+m.Key)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.HTTP.Do(req)
 	if err != nil {
@@ -144,7 +178,7 @@ func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*
 	if resp.StatusCode != 200 {
 		var buf bytes.Buffer
 		buf.ReadFrom(resp.Body)
-		httpErr := fmt.Errorf("mistral HTTP %d: %s", resp.StatusCode, buf.String())
+		httpErr := fmt.Errorf("%s HTTP %d: %s", m.label(), resp.StatusCode, buf.String())
 		if resp.StatusCode == 429 {
 			after := 4 * time.Second
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
@@ -169,7 +203,7 @@ func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*
 		return nil, err
 	}
 	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("mistral: no choices returned")
+		return nil, fmt.Errorf("%s: no choices returned", m.label())
 	}
 	return &ChatResult{Messages: []Message{out.Choices[0].Message}, Usage: out.Usage}, nil
 }

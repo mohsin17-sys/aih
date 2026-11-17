@@ -17,12 +17,13 @@ const commandTimeout = 30 * time.Second
 const maxResultLines = 40
 
 // readOnlyCommands are safe to run without any approval: they cannot modify
-// state. Add more as needed (keep it conservative).
+// state. Add more as needed (keep it conservative). Note: env is deliberately
+// NOT here — it dumps API keys into the model context and session logs.
 var readOnlyCommands = map[string]bool{
 	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
 	"df": true, "du": true, "free": true, "uptime": true, "pwd": true,
 	"whoami": true, "date": true, "uname": true, "echo": true,
-	"which": true, "file": true, "stat": true, "env": true,
+	"which": true, "file": true, "stat": true,
 }
 
 // gitReadOnlySubcommands: git as a whole is NOT read-only (push, reset,
@@ -53,6 +54,11 @@ func isReadOnly(cmdStr string) bool {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
+		}
+		// Output redirection makes the part a write (e.g.
+		// `echo x >> ~/.bashrc`); read-only tier requires no `>` at all.
+		if strings.Contains(part, ">") {
+			return false
 		}
 		// strip leading env-var assignments (FOO=bar cmd)
 		fields := strings.Fields(part)

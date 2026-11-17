@@ -147,11 +147,15 @@ type Model struct {
 
 	// telemetry
 	tokensIn     int
-	tokensOut    int
-	qwenCalls    int
-	qwenMsTotal  int64
-	mlxUp        bool
-	mlxURL       string
+	tokensOut     int
+	editorGens    int
+	editorMsTotal int64
+	mlxUp         bool
+	mlxURL        string
+
+	// plannerLabel is the configured planner model, shortened for the
+	// status bar (e.g. "Josiefied-Qwen3-8B-…").
+	plannerLabel string
 }
 
 // New builds the TUI model with a live agent and an interactive approver.
@@ -173,14 +177,33 @@ func New(wd string) (Model, error) {
 	ti.CharLimit = 0
 	ti.Focus()
 
+	label := "planner"
+	if cfg, err := config.Load(); err == nil {
+		label = shortModel(cfg.Planner.Model)
+	}
+
 	return Model{
 		input:        ti,
 		vp:           viewport.New(0, 0),
 		ag:           ag,
+		plannerLabel: label,
 		events:       make(chan agent.Event, 64),
 		approvalReqs: reqs,
 		approvalRes:  res,
 	}, nil
+}
+
+// shortModel condenses a model id for one status-line slot:
+// "mlx-community/Josiefied-Qwen3-8B-abliterated-v1-4bit" →
+// the last path segment, clipped to fit.
+func shortModel(id string) string {
+	if id == "" {
+		return "planner"
+	}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	return clip(id, 26)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -379,7 +402,7 @@ func (m *Model) renderEvent(ev agent.Event) {
 		in, _ := ev.Args["in"].(int)
 		out, _ := ev.Args["out"].(int)
 		if ev.Tool == "qwen" {
-			m.qwenCalls++
+			m.editorGens++
 			var ms int64
 				switch v := ev.Args["ms"].(type) {
 				case int:
@@ -389,7 +412,7 @@ func (m *Model) renderEvent(ev agent.Event) {
 				case float64:
 					ms = int64(v)
 				}
-				m.qwenMsTotal += ms
+				m.editorMsTotal += ms
 		} else {
 			m.tokensIn += in
 			m.tokensOut += out
@@ -464,7 +487,7 @@ func (m Model) View() string {
 	if m.mlxUp {
 		dot = "●"
 	}
-	statusLeft := "friday ▸ mistral-large ▸ qwen " + dot
+	statusLeft := "friday ▸ " + m.plannerLabel + " ▸ editor " + dot
 	if m.pending != nil {
 		statusLeft = askStyle.Render("🔑 approval needed: y / n")
 	} else if m.thinking {
@@ -493,8 +516,8 @@ func (m Model) sideLines() []string {
 		"",
 		fmt.Sprintf("Tokens in:  %s", human(m.tokensIn)),
 		fmt.Sprintf("Tokens out: %s", human(m.tokensOut)),
-		fmt.Sprintf("Qwen calls: %d", m.qwenCalls),
-		fmt.Sprintf("Qwen avg:   %s", avgMs(m.qwenMsTotal, m.qwenCalls)),
+		fmt.Sprintf("Editor gens: %d", m.editorGens),
+		fmt.Sprintf("Editor avg:  %s", avgMs(m.editorMsTotal, m.editorGens)),
 		fmt.Sprintf("Cost:       %s", costStr(m.tokensIn, m.tokensOut)),
 	}
 	for _, f := range m.filesChanged {

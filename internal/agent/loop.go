@@ -20,7 +20,7 @@ Rules:
 - when the task is complete, reply with a short summary and no tool calls`
 
 type Agent struct {
-	Planner  *providers.Mistral
+	Planner  providers.ChatProvider
 	Tools    map[string]*ToolHandler
 	Approve  Approver
 	WorkDir  string

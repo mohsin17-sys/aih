@@ -11,7 +11,7 @@ import (
 func GenerateEditTool(mlx *providers.MLX) *ToolHandler {
 	return &ToolHandler{
 		Name: "generate_edit",
-		Description: "Generate a complete file body using the local editor model (Qwen on MLX). Use for files longer than ~200 lines or when a large edit is needed. Provide a precise specification referencing real APIs/signatures. Returns the generated content; the caller must then save it with write_file.",
+		Description: "Generate a complete file body using the local editor model. Use for files longer than ~200 lines or when a large edit is needed. Provide a precise specification referencing real APIs/signatures. Returns the generated content; the caller must then save it with write_file.",
 		Parameters: map[string]any{
 			"file_path": map[string]any{"type": "string", "description": "Path of the file being generated"},
 			"spec":      map[string]any{"type": "string", "description": "Detailed specification of the file's contents"},

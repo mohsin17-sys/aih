@@ -1,6 +1,6 @@
 # FRIDAY (AIH)
 
-**A terminal-based AI coding agent with a hybrid brain: a cloud planner (Mistral) that thinks, a local editor model (Qwen on MLX) that writes, and a routing layer (Jev) that decides who handles what — with you approving every sensitive action.**
+**A terminal-based AI coding agent with a hybrid brain: a planner/architect model that thinks (any OpenAI-compatible server — e.g. mlx-serve on a Mac mini, Ollama, llama.cpp, or the Mistral API), a local editor model that writes, and a routing layer (Jev) that decides who handles what — with you approving every sensitive action.**
 
 FRIDAY reads, writes, and edits files in a real repository, runs shell commands, and reports everything it does live in a terminal UI (TUI), while keeping a full audit trail of every session.
 
@@ -28,7 +28,7 @@ FRIDAY reads, writes, and edits files in a real repository, runs shell commands,
 - **Autonomous coding tasks**: "summarize this repo", "draft a config file", "fix the failing test" — FRIDAY plans multi-step work with tool calls and executes it.
 - **File operations**: read, list, and write files (every write requires your approval).
 - **Shell commands**: runs commands with a 30-second timeout; read-only commands (like `df -h` or `git status`) run freely, destructive ones are refused outright, everything in between asks first.
-- **Local LLM offload**: large file generation (>200 lines) is delegated to a Qwen model running on your own hardware via [mlx-lm](https://github.com/ml-explore/mlx-examples), keeping API costs down.
+- **Local LLM offload**: large file generation (>200 lines) is delegated to a local editor model on your own hardware (e.g. Qwen via Ollama or MLX), keeping costs down and everything private.
 - **Full audit trail**: every session is written to a `.aih/sessions/*.jsonl` file — every tool call, every result, every approval.
 
 ## How it works
@@ -38,15 +38,17 @@ FRIDAY reads, writes, and edits files in a real repository, runs shell commands,
             |
             v
    +-----------------+     routing decision      +--------------+
-   |  PLANNER        | ---------------------->   | JEV          |
-   |  (Mistral API)  |   "which tool handles     | (orchestr.)  |
-   |  thinks & plans |    this task?"            +--------------+
+   |  PLANNER /      | ---------------------->   | JEV          |
+   |  ARCHITECT      |   "which tool handles     | (orchestr.)  |
+   |  (OpenAI-compat |    this task?")           +--------------+
+   |  server)        |
+   |  thinks & plans |
    +--------+--------+
             | tool calls
             v
    +----------------------------------------------------------+
    | TOOLS: read_file | list_dir | write_file | run_command   |
-   |        generate_edit (-> local Qwen model)               |
+   |        generate_edit (-> local editor model)             |
    +-----------------------------+----------------------------+
             | sensitive action?
             v
@@ -58,8 +60,10 @@ FRIDAY reads, writes, and edits files in a real repository, runs shell commands,
 ## Requirements
 
 - **Go 1.22+** (builds the binary)
-- **A Mistral API key** (free tier works) — [console.mistral.ai](https://console.mistral.ai)
-- **Optional**: a Mac with Apple Silicon running [mlx-lm](https://github.com/ml-explore/mlx-examples) for the local Qwen editor model. Without it, FRIDAY still works — the planner just writes files directly.
+- **A planner that speaks the OpenAI tool-calling protocol** — pick one:
+  - any local OpenAI-compatible server: [mlx-serve](https://pypi.org/project/mlx-serve/) on a Mac (e.g. `Josiefied-Qwen3-8B-abliterated-v1-4bit`), Ollama, llama.cpp `llama-server`, vLLM, ...
+  - or the Mistral API (free tier works) with a `MISTRAL_API_KEY` — [console.mistral.ai](https://console.mistral.ai)
+- **Optional**: a local editor model server for `generate_edit` (e.g. `ollama pull qwen3:4b-instruct`). Without it, FRIDAY still works — the planner just writes files directly.
 - **Optional**: a Jev orchestrator endpoint for routing decisions. Without it, `jev_route` is disabled and everything still functions.
 
 ## Installation
@@ -74,7 +78,7 @@ mkdir -p ~/bin
 go build -o ~/bin/friday ./cmd/aih
 
 # 3. make sure ~/bin is on your PATH (one-time setup)
-echo 'export PATH="/home/mo/bin:/home/mo/bin:/home/mo/bin:/home/mo/bin:/home/mo/bin:/home/mo/.local/bin:/home/mo/bin:/usr/local/bin:/usr/bin"' >> ~/.bashrc   # or ~/.zshrc
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc   # or ~/.zshrc
 source ~/.bashrc
 
 # 4. verify
@@ -96,11 +100,18 @@ The file looks like this (see the example file for every option explained):
 
 ```
 [planner]
-model = "mistral-large-latest"     # the cloud model that plans
+# LOCAL planner (e.g. mlx-serve on a Mac mini) — any OpenAI-compatible
+# server with tool-call support. base_url MUST include /v1.
+provider = "openai"
+base_url = "https://mos-mac-mini.tail2f1a37.ts.net/v1"
+model = "mtplx-qwen35-9b-optimized-speed"
+
+# ...or leave base_url empty for the Mistral API:
+# model = "mistral-large-latest"  (uses MISTRAL_API_KEY from the env)
 
 [editor]
-base_url = "http://192.168.1.50:8080/v1"   # your mlx-lm server
-model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+base_url = "http://127.0.0.1:11434/v1"     # e.g. Ollama on this machine
+model = "qwen3:4b-instruct"
 
 [jev]
 enabled = false                    # true if you run a Jev orchestrator
@@ -111,11 +122,11 @@ auto_approve_shell = false
 max_cost_usd = 5.0
 ```
 
-**Warning — important convention:** `editor.base_url` must include the `/v1`
-suffix (e.g. `http://host:8080/v1`, not `http://host:8080`). FRIDAY appends
-paths like `/chat/completions` and `/models` to this base.
+**Warning — important convention:** `planner.base_url` and `editor.base_url`
+must include the `/v1` suffix (e.g. `http://host:8080/v1`, not `http://host:8080`).
+FRIDAY appends paths like `/chat/completions` and `/models` to this base.
 
-Your Mistral API key comes from the environment:
+If you use the Mistral cloud fallback, the key comes from the environment:
 
 ```
 export MISTRAL_API_KEY="..."       # add to ~/.bashrc / ~/.zshrc
@@ -177,7 +188,10 @@ Three safety tiers for shell commands:
 | **Everything else** | `touch`, `sudo ...`, `git push` | interactive prompt (TUI) or config policy (headless) |
 
 All `write_file` calls require approval in the TUI. Chains are analyzed
-per-command: `cat a && rm b` is *not* read-only. Commands time out after
+per-command: `cat a && rm b` is *not* read-only. Commands containing
+output redirection (`>`, `>>`) are never treated as read-only —
+`echo x >> file` asks first like any other state-changing command.
+Commands time out after
 30 seconds. Denied agents are told not to retry and to state the limitation
 in their answer.
 
@@ -186,10 +200,10 @@ in their answer.
 The right side of the TUI shows live session stats:
 
 - **Tool / Jev / Editor calls, Files changed** — activity counters
-- **Tokens in / out** — Mistral planner usage for this session
-- **Qwen calls / avg** — local model invocations and mean latency
-- **Cost** — set `FRIDAY_PRICE_MTOK=2.0` (dollars per million tokens) before launch to see estimated spend
-- **qwen up/down indicator** — health of your local MLX server, re-checked every 15 seconds
+- **Tokens in / out** — planner model usage for this session
+- **Editor gens / avg** — local editor-model invocations and mean latency
+- **Cost** — set `FRIDAY_PRICE_MTOK=2.0` (dollars per million tokens) before launch to see estimated spend (irrelevant for local models)
+- **editor up/down indicator** — health of your local editor server, re-checked every 15 seconds
 
 ## Branding
 
@@ -231,9 +245,9 @@ go build ./...
 | `internal/app/app.go` | constructs the agent (tools, config, approvals) |
 | `internal/agent/loop.go` | the agent loop, event stream, approval gate |
 | `internal/agent/shell.go` | command execution: tiers, timeout, truncation |
-| `internal/agent/editor.go` | generate_edit -> local Qwen offload |
+| `internal/agent/editor.go` | generate_edit -> local editor-model offload |
 | `internal/agent/jevtool.go` | jev_route routing consultation |
-| `internal/providers/mistral.go` | planner API client (usage-aware) |
+| `internal/providers/mistral.go` | planner chat client (Mistral API or any OpenAI-compatible server, usage-aware + retrying) |
 | `internal/providers/mlx.go` | local model client (usage + latency + health) |
 | `internal/tui/` | the terminal UI |
 | `config/config.go` | config loading (`~/.config/aih/config.toml`) |
@@ -252,26 +266,35 @@ TOML syntax error. Compare against `config.example.toml`; common causes: a
 missing quote, or a section header like `[planner]` misspelled.
 
 **Mistral calls fail (`mistral HTTP 401`)** — `MISTRAL_API_KEY` isn't set or
-has expired. Check: `echo ur1W6utY62J0qvnVMZlUiN2eM0u6dNDN`. In the TUI the key comes from
-the environment you launched it from.
+has expired. Check: `echo "$MISTRAL_API_KEY"` prints a value in the
+environment FRIDAY was launched from (a renamed terminal won't inherit rc
+edits). If a key was ever pasted into a file, log, or chat — rotate it in
+the Mistral console and treat the old one as burned.
 
-**qwen dot shows "down" in the status bar but the model works** — the health
+**Planner errors (`planner HTTP ...` or connection refused)** — the planner
+`base_url` is wrong, the server is down, or it doesn't speak the
+OpenAI-compatible tool-call protocol. Test: `curl -s <base_url>/models`
+should return a JSON model list; a `tool_calls` response from
+`/chat/completions` is required for the agent loop. For mlx-serve on a
+Mac mini, make sure it listens on an interface reachable from this
+machine (Tailscale or LAN) and isn't asleep.
+
+**editor dot shows "down" in the status bar but the model works** — the health
 check pings `<base_url>/models`. Remember the convention: `base_url` **must
-end in `/v1`**. Test it yourself: `curl -s http://YOUR-HOST:8080/v1/models`
-should return a JSON model list within a couple of seconds. If the MLX server
-is on another machine (e.g. over Tailscale), make sure it's reachable and not
-sleeping.
+end in `/v1`**. Test it yourself: `curl -s http://127.0.0.1:11434/v1/models`
+(for Ollama) should return a JSON model list within a couple of seconds.
 
 **`generate_edit` errors like `Post ".../chat/completions": connection refused`**
-— the mlx-lm server is down or the URL is wrong. Start it with
-`mlx_lm.server --model mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` (on the
-Mac serving the model) and verify with the curl above. FRIDAY's planner will
-often retry with a rephrased request and recover on its own.
+— the editor server is down or the URL is wrong. For Ollama:
+`sudo systemctl enable --now ollama` (or `ollama serve`), and
+`ollama pull qwen3:4b-instruct` once. FRIDAY's planner will often retry
+with a rephrased request and recover on its own.
 
-**Qwen generation seems slow** — check `Qwen avg` in the telemetry panel.
-Tens of seconds for a 200+ line file is normal for a 14B model on a Mac.
-The agent retries failed calls automatically; a single failed attempt
-followed by a success shows up as `Editor calls: 2, Qwen calls: 1`.
+**Editor generation seems slow** — check `Editor avg` in the telemetry
+panel. Tens of seconds for a 200+ line file is normal for a small local
+model. The agent retries failed calls automatically; a single failed
+attempt followed by a success shows up as
+`Editor calls: 2, Editor gens: 1`.
 
 **Commands "hang"** — they don't; every command dies at 30 seconds and the
 result line says `(timed out after 30s; partial output above)`.
