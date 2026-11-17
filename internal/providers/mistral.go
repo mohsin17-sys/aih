@@ -1,10 +1,13 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -56,22 +59,52 @@ func NewMistral(model string) *Mistral {
 		Model:   model,
 		Key:     os.Getenv("MISTRAL_API_KEY"),
 		BaseURL: "https://api.mistral.ai/v1",
-		HTTP:    &http.Client{Timeout: 120 * time.Second},
+		HTTP:    streamHTTPClient(),
 	}
 }
 
 // NewOpenAICompat builds a chat client for any OpenAI-compatible server
-// (mlx-serve, Ollama, llama.cpp, vLLM, ...) — the wire protocol is the
-// same one the Mistral client speaks. apiKey may be empty when the
+// (mlx-serve, MTPLX, Ollama, llama.cpp, vLLM, ...) — the wire protocol is
+// the same one the Mistral client speaks. apiKey may be empty when the
 // server requires no authentication (the Authorization header is then
-// omitted). Local servers are allowed longer generations than the API.
+// omitted).
 func NewOpenAICompat(baseURL, model, apiKey string) *Mistral {
 	return &Mistral{
 		Model:   model,
 		Key:     apiKey,
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
-		HTTP:    &http.Client{Timeout: 600 * time.Second},
+		HTTP:    streamHTTPClient(),
 	}
+}
+
+// streamHTTPClient bounds only connection phases (dial, TLS, headers).
+// The response body is consumed as it is generated (SSE), so a
+// whole-request timeout would kill long thinking generations mid-stream;
+// the total planner exchange is capped by plannerTimeout instead.
+func streamHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 300 * time.Second,
+		},
+	}
+}
+
+// plannerTimeout caps one whole planner exchange. Thinking local models
+// generate for a long time before the first byte of the answer, so the
+// default is generous (15m). FRIDAY_PLANNER_TIMEOUT=<secs> overrides;
+// <= 0 disables the cap.
+func plannerTimeout() time.Duration {
+	if v := os.Getenv("FRIDAY_PLANNER_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n <= 0 {
+				return 0
+			}
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 900 * time.Second
 }
 
 type ChatResult struct {
@@ -154,7 +187,15 @@ func retryable(err error) bool {
 }
 
 func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*ChatResult, error) {
-	payload := map[string]any{"model": m.Model, "messages": msgs}
+	// Stream: headers arrive immediately and tokens flow as they are
+	// generated, so a thinking model that reasons for minutes never
+	// stalls the request waiting for the full response.
+	payload := map[string]any{
+		"model":          m.Model,
+		"messages":       msgs,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
 	}
@@ -163,13 +204,17 @@ func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*
 		os.WriteFile("/tmp/friday-debug.json", body, 0644)
 	}
 	req, _ := http.NewRequest("POST", m.BaseURL+"/chat/completions", bytes.NewBuffer(body))
-	// propagate cancellation so Ctrl-C / context deadlines abort the
-	// in-flight request instead of hanging for the full HTTP timeout
+	if d := plannerTimeout(); d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 	req = req.WithContext(ctx)
 	if m.Key != "" {
 		req.Header.Set("Authorization", "Bearer "+m.Key)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	resp, err := m.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -190,20 +235,86 @@ func (m *Mistral) chatOnce(ctx context.Context, msgs []Message, tools []Tool) (*
 		}
 		return nil, httpErr
 	}
-	var out struct {
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-		} `json:"usage"`
+	return m.readStream(resp.Body)
+}
+
+// readStream consumes an SSE chat stream and assembles content
+// fragments and tool-call deltas into one assistant message. Reasoning
+// deltas from thinking models are skipped; usage is taken from whatever
+// final chunk carries it.
+func (m *Mistral) readStream(body io.Reader) (*ChatResult, error) {
+	rd := bufio.NewReaderSize(body, 64*1024)
+	var (
+		assistant Message
+		calls     []ToolCall
+		promptTok int
+		complTok  int
+	)
+	assistant.Role = "assistant"
+	for {
+		line, err := rd.ReadBytes('\n')
+		data := bytes.TrimSpace(line)
+		if len(data) > 0 && bytes.HasPrefix(data, []byte("data:")) {
+			data = bytes.TrimSpace(bytes.TrimPrefix(data, []byte("data:")))
+			if bytes.Equal(data, []byte("[DONE]")) {
+				break
+			}
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content   string `json:"content"`
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+					} `json:"delta"`
+				} `json:"choices"`
+				Usage *struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal(data, &chunk) != nil {
+				// skip malformed events
+			} else {
+				for _, ch := range chunk.Choices {
+					assistant.Content += ch.Delta.Content
+					for _, tc := range ch.Delta.ToolCalls {
+						for len(calls) <= tc.Index {
+							calls = append(calls, ToolCall{Type: "function"})
+						}
+						if tc.ID != "" {
+							calls[tc.Index].ID = tc.ID
+						}
+						if tc.Function.Name != "" {
+							calls[tc.Index].Function.Name += tc.Function.Name
+						}
+						calls[tc.Index].Function.Arguments += tc.Function.Arguments
+					}
+				}
+				if chunk.Usage != nil {
+					promptTok = chunk.Usage.PromptTokens
+					complTok = chunk.Usage.CompletionTokens
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("%s: stream: %w", m.label(), err)
+		}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	if assistant.Content == "" && len(calls) == 0 {
+		return nil, fmt.Errorf("%s: empty stream", m.label())
 	}
-	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("%s: no choices returned", m.label())
-	}
-	return &ChatResult{Messages: []Message{out.Choices[0].Message}, Usage: out.Usage}, nil
+	assistant.ToolCalls = calls
+	res := &ChatResult{Messages: []Message{assistant}}
+	res.Usage.PromptTokens = promptTok
+	res.Usage.CompletionTokens = complTok
+	return res, nil
 }

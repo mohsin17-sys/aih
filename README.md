@@ -280,6 +280,14 @@ should return a JSON model list; a `tool_calls` response from
 Mac mini, make sure it listens on an interface reachable from this
 machine (Tailscale or LAN) and isn't asleep.
 
+**Planner steps time out (`planner: ... context deadline exceeded`)** —
+FRIDAY streams planner responses (SSE), so a thinking model that reasons
+for minutes keeps the connection alive instead of stalling on the full
+response; the only deadline is the per-step cap of 15 minutes. Raise or
+disable it with `FRIDAY_PLANNER_TIMEOUT=<seconds>` (`0` = unlimited).
+Whatever happens is recorded in the session JSONL as a
+`{"type":"error","tool":"planner"}` line.
+
 **editor dot shows "down" in the status bar but the model works** — the health
 check pings `<base_url>/models`. Remember the convention: `base_url` **must
 end in `/v1`**. Test it yourself: `curl -s http://127.0.0.1:11434/v1/models`

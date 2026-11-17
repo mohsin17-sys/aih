@@ -18,7 +18,7 @@ type MLX struct {
 }
 
 func NewMLX(baseURL, model string) *MLX {
-	return &MLX{BaseURL: baseURL, Model: model, HTTP: &http.Client{Timeout: 180 * time.Second}}
+	return &MLX{BaseURL: baseURL, Model: model, HTTP: &http.Client{Timeout: 600 * time.Second}}
 }
 
 // maxEditorTokens bounds one editor generation. Default 8192; override

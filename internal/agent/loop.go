@@ -85,6 +85,9 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 	}
 	res, err := a.Planner.Chat(ctx, a.Messages, tools)
 	if err != nil {
+		// keep the failure in the audit trail — a session that aborts on
+		// a planner timeout otherwise ends with no trace of why
+		a.record(Event{Type: "error", Tool: "planner", Result: err.Error()})
 		return false, err
 	}
 	a.TokensIn += res.Usage.PromptTokens
@@ -143,6 +146,7 @@ func (a *Agent) Run(ctx context.Context, maxSteps int) error {
 			return nil
 		}
 	}
+	a.record(Event{Type: "error", Tool: "planner", Result: fmt.Sprintf("max steps (%d) reached", maxSteps)})
 	return fmt.Errorf("max steps (%d) reached", maxSteps)
 }
 
