@@ -40,10 +40,11 @@ var (
 	hintStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	thinkStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 
-	// FRIDAY branding
-	neonStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("201"))
-	shadowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("93"))
-	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	// FRIDAY branding — dark Spider-Man red: deep suit red glyphs over a
+	// darker crimson shadow (ANSI 256: 124 = #af0000, 52 = #5f0000).
+	neonStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("124"))
+	shadowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("52"))
+	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("124"))
 )
 
 const (
