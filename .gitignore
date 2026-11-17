@@ -13,3 +13,4 @@ config.local.toml
 .DS_Store
 *.swp
 notes.txt
+.serena/
