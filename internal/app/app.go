@@ -164,14 +164,17 @@ func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agen
 		}(name, s.Command, s.Args, s.Env, s.Trusted)
 	}
 	var servers []*mcp.Server
+	var mcpUp, mcpDown []string
 	budget := time.After(45 * time.Second)
 	for i := 0; i < launched; i++ {
 		select {
 			case r := <-ch:
 				if r.err != nil {
 					fmt.Fprintf(os.Stderr, "friday: mcp %s disabled: %v\n", r.name, r.err)
+					mcpDown = append(mcpDown, r.name)
 					continue
 				}
+				mcpUp = append(mcpUp, fmt.Sprintf("%s (%d)", r.name, len(r.srv.Tools())))
 				servers = append(servers, r.srv)
 			case <-budget:
 				fmt.Fprintf(os.Stderr, "friday: mcp connect budget exceeded, continuing without remaining servers\n")
@@ -206,10 +209,12 @@ done:
 	}
 
 	ag := &agent.Agent{
-		Planner:  planner,
-		Tools:    tools,
-		WorkDir:  wd,
-		Messages: []providers.Message{{Role: "system", Content: agent.SystemPrompt}},
+		Planner:     planner,
+		Tools:       tools,
+		WorkDir:     wd,
+		Messages:    []providers.Message{{Role: "system", Content: agent.BuildSystemPrompt(cfg.Jev.Enabled, len(servers))}},
+		MCPServers:  mcpUp,
+		MCPDown:     mcpDown,
 	}
 
 	// Terminate the MCP child processes when the session ends.

@@ -15,9 +15,23 @@ You operate through tool calls only — never describe changes, execute them.
 Rules:
 - read_file before writing or discussing any file; never guess file contents
 - for large file bodies (>200 lines), call generate_edit to produce content, then write_file to save it
-- before run_command with side effects, call jev_route and include its decision
 - work incrementally; after each step, verify with read_file or run_command
 - when the task is complete, reply with a short summary and no tool calls`
+
+// BuildSystemPrompt extends the static brief with rules for the tools
+// that actually exist in this session: MCP servers when any connected,
+// jev_route only when the routing layer is enabled. The model never gets
+// instructions for tools it cannot call.
+func BuildSystemPrompt(jevEnabled bool, mcpServers int) string {
+	p := SystemPrompt
+	if mcpServers > 0 {
+		p += "\n- MCP servers extend your tools (search, browser, fetch, memory, ...): call mcp_list_tools first to see the connected servers and their parameter requirements, then use mcp_call with a JSON object of arguments"
+	}
+	if jevEnabled {
+		p += "\n- before run_command with side effects, call jev_route and include its decision"
+	}
+	return p
+}
 
 type Agent struct {
 	Planner  providers.ChatProvider
@@ -40,6 +54,12 @@ type Agent struct {
 	// (e.g. spawned MCP server processes). Callers must invoke it once
 	// the session ends.
 	Shutdown func()
+
+	// MCPServers names each connected MCP server and its tool count
+	// ("context7 (2)"), for the TUI status panel; MCPDown names the
+	// servers configured but failed to connect.
+	MCPServers []string `json:"-"`
+	MCPDown    []string `json:"-"`
 }
 
 // record appends an event and streams it if an emitter is attached.

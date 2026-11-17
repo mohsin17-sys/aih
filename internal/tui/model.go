@@ -514,12 +514,29 @@ func (m Model) sideLines() []string {
 		"",
 		fmt.Sprintf("Files changed: %d", len(m.filesChanged)),
 		"",
+	}
+	// MCP connectivity: name (tool count) per connected server, plus a
+	// line for any server that failed to start — the agent's MCP layer
+	// is otherwise invisible from inside the TUI.
+	if m.ag != nil {
+		if len(m.ag.MCPServers) > 0 || len(m.ag.MCPDown) > 0 {
+			lines = append(lines, fmt.Sprintf("MCP up/dn: %d/%d", len(m.ag.MCPServers), len(m.ag.MCPDown)))
+		}
+		for _, s := range m.ag.MCPServers {
+			lines = append(lines, "  "+clip(s, sidePanelWidth-6))
+		}
+		for _, s := range m.ag.MCPDown {
+			lines = append(lines, "  down "+s)
+		}
+		lines = append(lines, "")
+	}
+	lines = append(lines,
 		fmt.Sprintf("Tokens in:  %s", human(m.tokensIn)),
 		fmt.Sprintf("Tokens out: %s", human(m.tokensOut)),
 		fmt.Sprintf("Editor gens: %d", m.editorGens),
 		fmt.Sprintf("Editor avg:  %s", avgMs(m.editorMsTotal, m.editorGens)),
 		fmt.Sprintf("Cost:       %s", costStr(m.tokensIn, m.tokensOut)),
-	}
+	)
 	for _, f := range m.filesChanged {
 		lines = append(lines, "  "+clip(f, sidePanelWidth-4))
 	}
@@ -659,5 +676,30 @@ func Run() error {
 	if model.ag != nil && model.ag.Shutdown != nil {
 		model.ag.Shutdown() // terminate spawned MCP servers on exit
 	}
+	writeSession(model.ag)
 	return err
+}
+
+// writeSession persists the TUI session as a JSONL audit trail on exit,
+// mirroring headless mode: every run leaves .aih/sessions/<timestamp>.jsonl,
+// safe to grep, jq, or commit.
+func writeSession(ag *agent.Agent) {
+	if ag == nil || len(ag.Events) == 0 {
+		return
+	}
+	sessDir := filepath.Join(ag.WorkDir, ".aih", "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		return
+	}
+	sessFile := filepath.Join(sessDir, time.Now().Format("20060102-150405")+".jsonl")
+	f, err := os.Create(sessFile)
+	if err != nil {
+		return
+	}
+	enc := json.NewEncoder(f)
+	for _, ev := range ag.Events {
+		enc.Encode(ev)
+	}
+	f.Close()
+	fmt.Fprintf(os.Stderr, "session: %s\n", sessFile)
 }

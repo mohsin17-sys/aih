@@ -200,6 +200,7 @@ in their answer.
 The right side of the TUI shows live session stats:
 
 - **Tool / Jev / Editor calls, Files changed** — activity counters
+- **MCP up/dn** — connected MCP servers with tool counts, and any server that failed to start
 - **Tokens in / out** — planner model usage for this session
 - **Editor gens / avg** — local editor-model invocations and mean latency
 - **Cost** — set `FRIDAY_PRICE_MTOK=2.0` (dollars per million tokens) before launch to see estimated spend (irrelevant for local models)
