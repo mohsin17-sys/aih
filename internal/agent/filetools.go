@@ -7,6 +7,47 @@ import (
 	"strings"
 )
 
+// safePath resolves p inside root and refuses escapes: ../ chains,
+// absolute paths outside root, and symlinks that point out of the
+// working tree. The returned path is the literal join (callers operate
+// on the requested path); containment is decided on the symlink-resolved
+// path, walking up to the deepest existing ancestor so not-yet-created
+// files inherit a checked parent directory.
+func safePath(root, p string) (string, error) {
+	if filepath.IsAbs(p) && p != string(filepath.Separator) {
+		return "", fmt.Errorf("refused: %q is absolute; paths must be relative to the working directory", p)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if r, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = r
+	}
+	full := filepath.Join(absRoot, p)
+
+	resolved, tail := full, ""
+	for {
+		if r, err := filepath.EvalSymlinks(resolved); err == nil {
+			resolved = r
+			break
+		}
+		tail = filepath.Join(filepath.Base(resolved), tail)
+		parent := filepath.Dir(resolved)
+		if parent == resolved {
+			// Nothing in the chain exists; containment reduces to the
+			// lexical join, which cannot escape (filepath.Join cleans).
+			return full, nil
+		}
+		resolved = parent
+	}
+	if rel, err := filepath.Rel(absRoot, filepath.Join(resolved, tail)); err != nil ||
+		(rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+		return "", fmt.Errorf("refused: %q escapes the working directory", p)
+	}
+	return full, nil
+}
+
 func ReadFileTool() *ToolHandler {
 	return &ToolHandler{
 		Name:        "read_file",
@@ -14,11 +55,15 @@ func ReadFileTool() *ToolHandler {
 		Parameters: map[string]any{
 			"path": map[string]any{"type": "string", "description": "Path relative to the working directory"},
 		},
-		Required:  []string{"path"},
+		Required: []string{"path"},
 		Sensitive: false,
 		Run: func(tc ToolContext, args map[string]any) (string, error) {
 			p, _ := args["path"].(string)
-			data, err := os.ReadFile(filepath.Join(tc.WorkDir, p))
+			full, err := safePath(tc.WorkDir, p)
+			if err != nil {
+				return "", err
+			}
+			data, err := os.ReadFile(full)
 			if err != nil {
 				return "", err
 			}
@@ -43,7 +88,11 @@ func ListDirTool() *ToolHandler {
 			if p == "" {
 				p = "."
 			}
-			entries, err := os.ReadDir(filepath.Join(tc.WorkDir, p))
+			full, err := safePath(tc.WorkDir, p)
+			if err != nil {
+				return "", err
+			}
+			entries, err := os.ReadDir(full)
 			if err != nil {
 				return "", err
 			}
@@ -68,12 +117,15 @@ func WriteFileTool() *ToolHandler {
 			"path":    map[string]any{"type": "string"},
 			"content": map[string]any{"type": "string"},
 		},
-		Required:  []string{"path", "content"},
+		Required: []string{"path", "content"},
 		Sensitive: true,
 		Run: func(tc ToolContext, args map[string]any) (string, error) {
 			p, _ := args["path"].(string)
 			content, _ := args["content"].(string)
-			full := filepath.Join(tc.WorkDir, p)
+			full, err := safePath(tc.WorkDir, p)
+			if err != nil {
+				return "", err
+			}
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 				return "", err
 			}

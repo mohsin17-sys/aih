@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"aiharness/internal/agent"
@@ -36,6 +38,17 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
+	}
+	if ag.Shutdown != nil {
+		defer ag.Shutdown() // terminate spawned MCP servers on exit
+		// and also on SIGHUP (terminal closed), which does not run defers
+		sigHUP := make(chan os.Signal, 1)
+		signal.Notify(sigHUP, syscall.SIGHUP)
+		go func() {
+			<-sigHUP
+			ag.Shutdown()
+			os.Exit(1)
+		}()
 	}
 	ag.Messages = append(ag.Messages, providers.Message{Role: "user", Content: *execMode})
 	ag.Emit = printEvent

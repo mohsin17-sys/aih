@@ -17,13 +17,23 @@ const commandTimeout = 30 * time.Second
 const maxResultLines = 40
 
 // readOnlyCommands are safe to run without any approval: they cannot modify
-// state. Add more as needed (keep it conservative).
+// state. Add more as needed (keep it conservative). Note: env is deliberately
+// NOT here — it dumps API keys into the model context and session logs.
 var readOnlyCommands = map[string]bool{
 	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
 	"df": true, "du": true, "free": true, "uptime": true, "pwd": true,
 	"whoami": true, "date": true, "uname": true, "echo": true,
-	"which": true, "file": true, "stat": true, "env": true,
-	"git": true, // status/log/diff are the common cases; see note below
+	"which": true, "file": true, "stat": true,
+}
+
+// gitReadOnlySubcommands: git as a whole is NOT read-only (push, reset,
+// clean, checkout can all destroy or publish work), so only these
+// subcommands count as read-only.
+var gitReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "tag": true, "rev-parse": true, "ls-files": true,
+	"remote": true, "blame": true, "describe": true, "shortlog": true,
+	"grep": true,
 }
 
 // hardBlockPatterns are refused even if the user approves. These are the
@@ -45,6 +55,11 @@ func isReadOnly(cmdStr string) bool {
 		if part == "" {
 			continue
 		}
+		// Output redirection makes the part a write (e.g.
+		// `echo x >> ~/.bashrc`); read-only tier requires no `>` at all.
+		if strings.Contains(part, ">") {
+			return false
+		}
 		// strip leading env-var assignments (FOO=bar cmd)
 		fields := strings.Fields(part)
 		i := 0
@@ -53,6 +68,16 @@ func isReadOnly(cmdStr string) bool {
 		}
 		if i >= len(fields) {
 			return false
+		}
+		if fields[i] == "git" {
+			// git is only read-only for known-safe subcommands
+			// (git push / reset / clean / checkout ... are not)
+			if i+1 >= len(fields) || fields[i+1] == "" ||
+				strings.HasPrefix(fields[i+1], "-") ||
+				!gitReadOnlySubcommands[fields[i+1]] {
+				return false
+			}
+			continue
 		}
 		if !readOnlyCommands[fields[i]] {
 			return false

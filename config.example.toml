@@ -3,35 +3,83 @@
 # All sections are optional; missing values fall back to safe defaults.
 
 [planner]
-# The Mistral model that plans and drives tool calls.
-provider = "mistral"
-model = "mistral-large-latest"
+# The model that plans and drives tool calls.
+# Two ways to run it:
+#
+#  1. LOCAL / self-hosted, any OpenAI-compatible server (mlx-serve,
+#     Ollama, llama.cpp, vLLM, ...): set base_url (+ optional api_key —
+#     omit or leave empty if the server needs no auth). base_url MUST
+#     include the /v1 suffix, e.g. "http://10.0.0.104:11234/v1".
+#     The server must support OpenAI-style tool calling (tool_calls).
+#     Example — Qwen3.8-9B-heretic (uncensored) on MTPLX on a Mac mini,
+#     exposed tailnet-only via `tailscale serve`:
+provider = "openai"
+base_url = "https://mos-mac-mini.tail2f1a37.ts.net/v1"
+model = "mtplx-qwen35-9b-optimized-speed"
+#     api_key = ""                        # default: none
+#
+#  2. Mistral cloud (fallback): leave base_url empty — FRIDAY then uses
+#     https://api.mistral.ai/v1 with MISTRAL_API_KEY from the environment.
+#       provider = "mistral"
+#       model = "mistral-large-latest"
 
 [editor]
-# Local Qwen model served by mlx-lm (optional).
+# Local editor model for large content generation (generate_edit).
+# Any OpenAI-compatible server; Ollama is the easiest option.
+# Recommended on a ~6GB GPU: a code-specialized model, context-trimmed so it
+# mostly fits VRAM (Ollama's 16K default spills a 7B to CPU on a 6GB card):
+#   ollama pull deepseek-coder:6.7b
+#   printf 'FROM deepseek-coder:6.7b\nPARAMETER num_ctx 8192\n' > Modelfile
+#   ollama create deepseek-coder-friday -f Modelfile
+# A smaller, fully-GPU-resident alternative: qwen2.5-coder:3b or deepseek-coder:1.3b.
 # NOTE: base_url MUST include the /v1 suffix — FRIDAY appends
 #       /chat/completions and /models to this base.
-#       Example: "http://192.168.1.50:8080/v1"
-provider = "mlx"
-base_url = "http://127.0.0.1:8080/v1"
-model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+model = "deepseek-coder-friday"
 
 [jev]
-# Routing orchestrator. If you don't run one, leave false —
-# everything works without it.
+# System One routing model (decides which tool should handle a task).
+# Leave enabled = false to skip it entirely — everything works without it.
+# When enabled, jev_route calls a POST /v1/systemone endpoint. Two options:
+#
+#  1. LOCAL Laya (free, private, no key) — github.com/NandhaKishorM/laya:
+#       pip install "laya[serve]" && LAYA_DEVICE=cpu LAYA_MODELS=english laya-serve
+#     then point base_url at it (the wire protocol matches hosted Jev):
 enabled = false
+base_url = "http://127.0.0.1:8000/v1/systemone"
+model = "english"
+#
+#  2. Hosted TypeSafe Jev: leave base_url empty and export TYPESAFE_API_KEY.
+#     (base_url/model here map to TYPESAFE_API_URL/TYPESAFE_MODEL; an env var
+#      already set wins over these, for one-off overrides.)
 
 [safety]
-# Headless mode (-e) only. In the interactive TUI you approve
-# everything live; these decide what runs WITHOUT a human present.
-# Keep both false unless you trust the task completely.
+# auto_approve_all = true: fully autonomous in BOTH the TUI and headless
+# mode — no approval prompts for writes, shell commands, or untrusted MCP
+# calls. In the TUI, F2 or the "/auto" command toggles it live at runtime.
+# Hard-blocked destructive command patterns (rm -rf /, mkfs, dd to
+# devices, fork bombs, shutdown) are still refused, and everything lands
+# in the session audit trail.
+auto_approve_all = false
+# Headless-mode (-e) fine-grained fallbacks when auto_approve_all is off:
 auto_approve_write = false
 auto_approve_shell = false
 max_cost_usd = 5.0
 
 [mcp]
-# Reserved for MCP server integrations.
+# MCP servers: each entry spawns a stdio MCP server. All connected servers
+# are exposed to the planner through two generic tools (mcp_list_tools and
+# mcp_call), keeping the request size small regardless of how many tools
+# the servers advertise.
 [mcp.servers]
+
+# Example server:
+# [mcp.servers.example]
+# command = "npx"
+# args = ["-y", "@example/mcp-server"]
+# trusted = false   # per-call approval required (default)
+# enabled = true    # optional, default true; false skips the server entirely
 
 [ui]
 # Reserved for theme selection.

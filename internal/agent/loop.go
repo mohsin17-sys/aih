@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"os"
 	"fmt"
 
 	"aiharness/internal/providers"
@@ -13,12 +15,26 @@ You operate through tool calls only — never describe changes, execute them.
 Rules:
 - read_file before writing or discussing any file; never guess file contents
 - for large file bodies (>200 lines), call generate_edit to produce content, then write_file to save it
-- before run_command with side effects, call jev_route and include its decision
 - work incrementally; after each step, verify with read_file or run_command
 - when the task is complete, reply with a short summary and no tool calls`
 
+// BuildSystemPrompt extends the static brief with rules for the tools
+// that actually exist in this session: MCP servers when any connected,
+// jev_route only when the routing layer is enabled. The model never gets
+// instructions for tools it cannot call.
+func BuildSystemPrompt(jevEnabled bool, mcpServers int) string {
+	p := SystemPrompt
+	if mcpServers > 0 {
+		p += "\n- MCP servers extend your tools (search, browser, fetch, memory, ...): call mcp_list_tools first to see the connected servers and their parameter requirements, then use mcp_call with a JSON object of arguments"
+	}
+	if jevEnabled {
+		p += "\n- before run_command with side effects, call jev_route and include its decision"
+	}
+	return p
+}
+
 type Agent struct {
-	Planner  *providers.Mistral
+	Planner  providers.ChatProvider
 	Tools    map[string]*ToolHandler
 	Approve  Approver
 	WorkDir  string
@@ -33,6 +49,17 @@ type Agent struct {
 	// Session telemetry
 	TokensIn  int `json:"tokens_in"`
 	TokensOut int `json:"tokens_out"`
+
+	// Shutdown, when non-nil, releases resources held by the agent
+	// (e.g. spawned MCP server processes). Callers must invoke it once
+	// the session ends.
+	Shutdown func()
+
+	// MCPServers names each connected MCP server and its tool count
+	// ("context7 (2)"), for the TUI status panel; MCPDown names the
+	// servers configured but failed to connect.
+	MCPServers []string `json:"-"`
+	MCPDown    []string `json:"-"`
 }
 
 // record appends an event and streams it if an emitter is attached.
@@ -56,8 +83,11 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 	for _, t := range a.Tools {
 		tools = append(tools, t.Definition())
 	}
-	res, err := a.Planner.Chat(a.Messages, tools)
+	res, err := a.Planner.Chat(ctx, a.Messages, tools)
 	if err != nil {
+		// keep the failure in the audit trail — a session that aborts on
+		// a planner timeout otherwise ends with no trace of why
+		a.record(Event{Type: "error", Tool: "planner", Result: err.Error()})
 		return false, err
 	}
 	a.TokensIn += res.Usage.PromptTokens
@@ -74,7 +104,18 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 
 	for _, call := range assistantMsg.ToolCalls {
 		var args map[string]any
-		json.Unmarshal([]byte(call.Function.Arguments), &args)
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			// report the parse failure to the model instead of running
+			// the tool with silently-empty arguments
+			a.record(Event{Type: "error", Tool: call.Function.Name, Result: "invalid arguments JSON: " + err.Error()})
+			a.Messages = append(a.Messages, providers.Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Name:       call.Function.Name,
+				Content:    "ERROR: invalid arguments JSON: " + err.Error(),
+			})
+			continue
+		}
 		a.record(Event{Type: "tool_call", Tool: call.Function.Name, Args: args})
 
 		result, err := a.runTool(ctx, call.Function.Name, args)
@@ -87,7 +128,7 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 			msg.Content = "ERROR: " + err.Error()
 			a.record(Event{Type: "error", Tool: call.Function.Name, Result: err.Error()})
 		} else {
-			msg.Content = result
+			msg.Content = a.trimResult(result)
 			a.record(Event{Type: "tool_result", Tool: call.Function.Name, Result: result})
 		}
 		a.Messages = append(a.Messages, msg)
@@ -97,6 +138,13 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 
 func (a *Agent) Run(ctx context.Context, maxSteps int) error {
 	for i := 0; i < maxSteps; i++ {
+		// Honor interruption promptly: if the caller cancelled the context
+		// (e.g. the TUI is pausing this task to run a queued prompt), stop
+		// before starting another planner step instead of only failing on
+		// the next network call.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		done, err := a.Step(ctx)
 		if err != nil {
 			return err
@@ -105,6 +153,7 @@ func (a *Agent) Run(ctx context.Context, maxSteps int) error {
 			return nil
 		}
 	}
+	a.record(Event{Type: "error", Tool: "planner", Result: fmt.Sprintf("max steps (%d) reached", maxSteps)})
 	return fmt.Errorf("max steps (%d) reached", maxSteps)
 }
 
@@ -119,10 +168,36 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) (
 			sensitive = ShouldPrompt(cmd)
 		}
 	}
+	if t.SensitiveFn != nil {
+		sensitive = t.SensitiveFn(args)
+	}
 	if sensitive && a.Approve != nil {
 		if !a.Approve(ApprovalRequest{Tool: name, Args: args}) {
 			return "", fmt.Errorf("denied by user — do not retry this or similar commands; continue with non-sensitive tools (read-only shell commands and file reads are always available) or state the limitation in your final answer")
 		}
 	}
 	return t.Run(ToolContext{WorkDir: a.WorkDir, Emit: a.record}, args)
+}
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// trimResult ages tool results out of the MODEL context (the audit
+// log keeps full text). Once the conversation exceeds the round
+// threshold, result bodies are capped to stop quadratic token growth.
+func (a *Agent) trimResult(s string) string {
+	if len(a.Messages) <= envInt("FRIDAY_CTX_MAXMSGS", 12) {
+		return s
+	}
+	cap := envInt("FRIDAY_CTX_RESULTCAP", 500)
+	if len(s) <= cap {
+		return s
+	}
+	return s[:cap] + "\n…[truncated; full text preserved in session log]"
 }
