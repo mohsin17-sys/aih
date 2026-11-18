@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -138,6 +139,17 @@ type Model struct {
 	pending      *agent.ApprovalRequest
 
 	thinking     bool
+	// queued holds prompts the user typed while a task was running. They
+	// run in order once the current task finishes — or immediately, when
+	// the user presses Enter a second time to interrupt (see Update).
+	queued []string
+	// cancel stops the in-flight agent run; set when a run starts, called
+	// when the user interrupts, cleared when the run ends.
+	cancel context.CancelFunc
+	// interrupting is true between the user asking to pause and the run
+	// actually stopping, so a cancel-induced error is reported as a pause
+	// rather than a failure.
+	interrupting bool
 	bannerShown  bool
 	jevCalls     int
 	editorCalls  int
@@ -292,13 +304,40 @@ func waitApproval(ch chan agent.ApprovalRequest) tea.Cmd {
 	}
 }
 
-// startAgent runs the agent loop in the background until it completes.
-func (m Model) startAgent() tea.Cmd {
+// startAgent runs the agent loop in the background until it completes or
+// ctx is cancelled (an interrupt). Cancellation surfaces as agentDoneMsg
+// with a context error, which Update renders as a pause.
+func (m Model) startAgent(ctx context.Context) tea.Cmd {
 	ag := m.ag
 	return func() tea.Msg {
-		err := ag.Run(context.Background(), maxSteps)
+		err := ag.Run(ctx, maxSteps)
 		return agentDoneMsg{err}
 	}
+}
+
+// launch appends prompt as a user turn, starts a fresh cancellable agent
+// run, and returns the command batch that drives it. It is the single
+// entry point for both a normal submit and flushing the queue.
+func (m *Model) launch(prompt string) tea.Cmd {
+	m.ag.Messages = append(m.ag.Messages, providers.Message{Role: "user", Content: prompt})
+	m.appendTranscript(userStyle.Render("you: ") + clip(prompt, maxInt(10, m.clipWidth)) + "\n")
+	m.thinking = true
+	m.ag.Emit = func(ev agent.Event) { m.events <- ev }
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	return tea.Batch(m.startAgent(ctx), waitEvent(m.events), waitApproval(m.approvalReqs))
+}
+
+// flushQueued starts a run for the first queued prompt, if any, keeping the
+// rest in the queue to run after it. Returns nil when the queue is empty.
+func (m *Model) flushQueued() tea.Cmd {
+	if len(m.queued) == 0 {
+		return nil
+	}
+	next := m.queued[0]
+	m.queued = m.queued[1:]
+	m.interrupting = false
+	return m.launch(next)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -334,10 +373,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		m.thinking = false
+		m.cancel = nil
 		m.input.Focus()
 		if msg.err != nil {
-			m.appendTranscript(errStyle.Render("✗ agent error: "+firstLine(msg.err.Error())) + "\n\n")
+			// A cancelled context means the user paused this task on
+			// purpose — report it as a pause, not a failure.
+			if m.interrupting || errors.Is(msg.err, context.Canceled) {
+				m.appendTranscript(hintStyle.Render("⏸ task paused") + "\n\n")
+			} else {
+				m.appendTranscript(errStyle.Render("✗ agent error: "+firstLine(msg.err.Error())) + "\n\n")
+			}
 		}
+		// Run the next queued prompt (whether the task finished on its own
+		// or was just interrupted). flushQueued starts a fresh run.
+		if cmd := m.flushQueued(); cmd != nil {
+			return m, cmd
+		}
+		m.interrupting = false
 		if len(m.events) > 0 {
 			return m, waitEvent(m.events)
 		}
@@ -379,10 +431,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case tea.KeyEnter:
+			line := strings.TrimSpace(m.input.Value())
+
+			// While a task is running, Enter drives the queue instead of
+			// starting a second concurrent run:
+			//   • non-empty line  → enqueue it (runs after the current task)
+			//   • empty line, queue non-empty → interrupt now, run the queue
 			if m.thinking {
+				if line != "" {
+					m.queued = append(m.queued, line)
+					m.input.SetValue("")
+					m.appendTranscript(hintStyle.Render(fmt.Sprintf(
+						"⏸ queued (%d) — runs when the current task ends; press Enter on an empty line to interrupt and run it now", len(m.queued))) + "\n")
+					return m, nil
+				}
+				if len(m.queued) > 0 && !m.interrupting {
+					m.interrupting = true
+					m.appendTranscript(askStyle.Render("⏸ interrupting current task to run the queued prompt…") + "\n")
+					if m.cancel != nil {
+						m.cancel()
+					}
+				}
 				return m, nil
 			}
-			line := strings.TrimSpace(m.input.Value())
+
 			m.input.SetValue("")
 			if line == "" {
 				return m, nil
@@ -395,12 +467,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleAuto()
 				return m, nil
 			}
-			m.ag.Messages = append(m.ag.Messages, providers.Message{Role: "user", Content: line})
-			m.appendTranscript(userStyle.Render("you: ") + clip(line, maxInt(10, m.clipWidth)) + "\n")
-			m.thinking = true
-			m.input.Blur()
-			m.ag.Emit = func(ev agent.Event) { m.events <- ev }
-			return m, tea.Batch(m.startAgent(), waitEvent(m.events), waitApproval(m.approvalReqs))
+			return m, m.launch(line)
 		}
 	}
 
@@ -541,8 +608,13 @@ func (m Model) View() string {
 	}
 	if m.pending != nil {
 		statusLeft = askStyle.Render("🔑 approval needed: y / n")
+	} else if m.interrupting {
+		statusLeft = askStyle.Render("⏸ interrupting…")
 	} else if m.thinking {
 		statusLeft = thinkStyle.Render("⏳ thinking…")
+		if n := len(m.queued); n > 0 {
+			statusLeft += hintStyle.Render(fmt.Sprintf("  %d queued · Enter on empty line to interrupt", n))
+		}
 	}
 	footer := footerStyle.Render(footerText())
 	status := statusStyle.Render(" "+statusLeft) +

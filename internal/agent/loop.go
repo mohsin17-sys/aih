@@ -138,6 +138,13 @@ func (a *Agent) Step(ctx context.Context) (done bool, err error) {
 
 func (a *Agent) Run(ctx context.Context, maxSteps int) error {
 	for i := 0; i < maxSteps; i++ {
+		// Honor interruption promptly: if the caller cancelled the context
+		// (e.g. the TUI is pausing this task to run a queued prompt), stop
+		// before starting another planner step instead of only failing on
+		// the next network call.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		done, err := a.Step(ctx)
 		if err != nil {
 			return err

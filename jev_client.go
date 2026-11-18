@@ -7,6 +7,7 @@ import (
     "io"
     "net/http"
     "os"
+    "strings"
     "time"
 )
 
@@ -38,15 +39,25 @@ type JevResponse struct {
     } `json:"usage"`
 }
 
-// QueryJev asks Jev to decide which MCP tool to use. Returns raw body + status.
+// QueryJev asks the System One router to decide which MCP tool to use, and
+// returns the raw body + status. The endpoint is Jev-wire-compatible:
+//   - hosted TypeSafe Jev  (default; needs TYPESAFE_API_KEY), or
+//   - a local Laya server  (laya-serve, POST /v1/systemone, no key needed) —
+//     point TYPESAFE_API_URL at it and set TYPESAFE_MODEL=english.
+// The key is required only when the endpoint is TypeSafe's hosted API; a
+// local server authenticates only if TYPESAFE_API_KEY (== LAYA_API_KEY) is set.
 func QueryJev(state string, toolOptions []string) (string, int, error) {
     apiKey := os.Getenv("TYPESAFE_API_KEY")
-    if apiKey == "" {
-        return "", 0, fmt.Errorf("TYPESAFE_API_KEY not set")
-    }
     url := os.Getenv("TYPESAFE_API_URL")
     if url == "" {
         url = "https://api.typesafe.ai/v1/systemone"
+    }
+    if apiKey == "" && strings.Contains(url, "typesafe.ai") {
+        return "", 0, fmt.Errorf("TYPESAFE_API_KEY not set (hosted Jev); set it, or point TYPESAFE_API_URL at a local laya-serve")
+    }
+    model := os.Getenv("TYPESAFE_MODEL")
+    if model == "" {
+        model = "jev-latest"
     }
 
     criteria := make(map[string]string)
@@ -55,7 +66,7 @@ func QueryJev(state string, toolOptions []string) (string, int, error) {
     }
 
     payload := JevRequest{
-        Model: "jev-latest",
+        Model: model,
         State: state,
         Questions: map[string]JevQuestion{
             "selected_tool": {

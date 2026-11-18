@@ -64,7 +64,7 @@ FRIDAY reads, writes, and edits files in a real repository, runs shell commands,
   - any local OpenAI-compatible server: [mlx-serve](https://pypi.org/project/mlx-serve/) on a Mac (e.g. `Josiefied-Qwen3-8B-abliterated-v1-4bit`), Ollama, llama.cpp `llama-server`, vLLM, ...
   - or the Mistral API (free tier works) with a `MISTRAL_API_KEY` — [console.mistral.ai](https://console.mistral.ai)
 - **Optional**: a local editor model server for `generate_edit` (e.g. `ollama pull qwen3:4b-instruct`). Without it, FRIDAY still works — the planner just writes files directly.
-- **Optional**: a Jev orchestrator endpoint for routing decisions. Without it, `jev_route` is disabled and everything still functions.
+- **Optional**: a System One routing endpoint for `jev_route` decisions. Use a **local [Laya](https://github.com/NandhaKishorM/laya) server** (`pip install "laya[serve]"` → `laya-serve`; free, private, no key — set `[jev].base_url = "http://127.0.0.1:8000/v1/systemone"`) or hosted TypeSafe Jev (`TYPESAFE_API_KEY`). Without either, `jev_route` is disabled and everything still functions.
 
 ## Installation
 
@@ -164,6 +164,15 @@ friday
 Type a task, press Enter. Watch the live transcript: `-> tool args` for calls,
 `<- result` for outputs, a `run_command -- allow? [y]es / [n]o` prompt when
 something needs approval. Type `exit` to quit.
+
+**Queue a prompt while FRIDAY is working.** You don't have to wait for the
+current task to finish before typing the next one:
+
+- Keep typing while a task runs, then press **Enter** to **queue** that prompt.
+  It runs automatically as soon as the current task ends. Queue as many as you
+  like; the status line shows the count.
+- Press **Enter on an empty line** to **interrupt now** — FRIDAY pauses the
+  current task at its next step and immediately starts the queued prompt.
 
 **Headless (single task, scriptable):**
 

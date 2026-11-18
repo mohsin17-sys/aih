@@ -25,18 +25,34 @@ model = "mtplx-qwen35-9b-optimized-speed"
 
 [editor]
 # Local editor model for large content generation (generate_edit).
-# Any OpenAI-compatible server; Ollama is the easiest option:
-#   ollama pull qwen3:4b-instruct && ollama serve
+# Any OpenAI-compatible server; Ollama is the easiest option.
+# Recommended on a ~6GB GPU: a code-specialized model, context-trimmed so it
+# mostly fits VRAM (Ollama's 16K default spills a 7B to CPU on a 6GB card):
+#   ollama pull deepseek-coder:6.7b
+#   printf 'FROM deepseek-coder:6.7b\nPARAMETER num_ctx 8192\n' > Modelfile
+#   ollama create deepseek-coder-friday -f Modelfile
+# A smaller, fully-GPU-resident alternative: qwen2.5-coder:3b or deepseek-coder:1.3b.
 # NOTE: base_url MUST include the /v1 suffix — FRIDAY appends
 #       /chat/completions and /models to this base.
 provider = "ollama"
 base_url = "http://127.0.0.1:11434/v1"
-model = "qwen3:4b-instruct"
+model = "deepseek-coder-friday"
 
 [jev]
-# Routing orchestrator. If you don't run one, leave false —
-# everything works without it.
+# System One routing model (decides which tool should handle a task).
+# Leave enabled = false to skip it entirely — everything works without it.
+# When enabled, jev_route calls a POST /v1/systemone endpoint. Two options:
+#
+#  1. LOCAL Laya (free, private, no key) — github.com/NandhaKishorM/laya:
+#       pip install "laya[serve]" && LAYA_DEVICE=cpu LAYA_MODELS=english laya-serve
+#     then point base_url at it (the wire protocol matches hosted Jev):
 enabled = false
+base_url = "http://127.0.0.1:8000/v1/systemone"
+model = "english"
+#
+#  2. Hosted TypeSafe Jev: leave base_url empty and export TYPESAFE_API_KEY.
+#     (base_url/model here map to TYPESAFE_API_URL/TYPESAFE_MODEL; an env var
+#      already set wins over these, for one-off overrides.)
 
 [safety]
 # auto_approve_all = true: fully autonomous in BOTH the TUI and headless

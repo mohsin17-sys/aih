@@ -132,6 +132,19 @@ func NewAgent(wd string, approver func(agent.ApprovalRequest) bool) (*agent.Agen
 		"run_command": agent.RunCommandTool(),
 	}
 	if cfg.Jev.Enabled {
+		// Bridge the [jev] config into the TYPESAFE_* env the routing client
+		// reads, so pointing jev_route at a local laya-serve is config-only.
+		// An already-set env var still wins (useful for one-off overrides).
+		setenvIfUnset := func(k, v string) {
+			if v != "" {
+				if _, ok := os.LookupEnv(k); !ok {
+					os.Setenv(k, v)
+				}
+			}
+		}
+		setenvIfUnset("TYPESAFE_API_URL", cfg.Jev.BaseURL)
+		setenvIfUnset("TYPESAFE_MODEL", cfg.Jev.Model)
+		setenvIfUnset("TYPESAFE_API_KEY", cfg.Jev.APIKey)
 		tools["jev_route"] = agent.JevRouteTool()
 	}
 	if cfg.Editor.BaseURL != "" {

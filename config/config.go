@@ -24,6 +24,15 @@ type Config struct {
 	} `toml:"editor"`
 	Jev struct {
 		Enabled bool `toml:"enabled"`
+		// BaseURL/Model/APIKey configure the System One routing endpoint
+		// the jev_route tool calls. They map to the TYPESAFE_* env vars the
+		// client reads, so a local laya-serve is a config-only switch:
+		//   base_url = "http://127.0.0.1:8000/v1/systemone"
+		//   model    = "english"
+		// Leave BaseURL empty to use hosted TypeSafe Jev (needs TYPESAFE_API_KEY).
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+		APIKey  string `toml:"api_key"`
 	} `toml:"jev"`
 	Safety struct {
 		AutoApproveWrite bool    `toml:"auto_approve_write"`
